@@ -26,11 +26,13 @@ static const unsigned int MAGIC = 0x4455454C;
 static const float GROUND_Y = 380.0f;
 static const float GRAVITY = 0.65f;
 static const unsigned int SAVE_VERSION = 20261103;
+static const int VIS_OFF_Y = -25;   // 当たり判定の論理座標 → 画面上のキャラ絵の位置へのずれ
 
 enum GameMode {
     MODE_TITLE,
     MODE_SLOT_SELECT,
     MODE_CHARA_SELECT,
+    MODE_STORY_INTRO,
     MODE_VS_SCREEN,
     MODE_BATTLE_PLAY,
     MODE_KO_DISPLAY,
@@ -38,6 +40,8 @@ enum GameMode {
     MODE_WIN_QUOTE,
     MODE_GAME_OVER,
     MODE_ENDING,
+    MODE_TRAINING_SELECT,
+    MODE_TRAINING,
     MODE_NET_MENU,
     MODE_HOST_WAIT,
     MODE_CLIENT_INPUT,
@@ -69,35 +73,18 @@ enum ActionState {
     ACT_DODGE,           // 回避（無敵ロール）
     ACT_SLIP,            // 転倒・スリップ（無防備）
     ACT_BOAR_ROLL,       // いのししマン：サイコロ演出中
-    ACT_BOAR_CHARGE,     // いのししマン：ガード不能突進
+    ACT_BOAR_CHARGE,     // いのししマン：突進
     ACT_COUNTER_STANCE,  // たけし：当身構え
     ACT_COUNTER_STRIKE,  // たけし：当身反撃
-    ACT_TAUNT            // たけし：挑発
+    ACT_TAUNT,           // たけし：挑発
+    ACT_STATE_COUNT
 };
 
-enum PacketType {
-    PKT_HELLO = 1,
-    PKT_STAGE_SYNC,
-    PKT_CHARA_SYNC,
-    PKT_INPUT,
-    PKT_STATE,
-    PKT_SPAWN_SHOT
+// 入力ビット（キーボード・通信で共通）
+enum InputBit {
+    IN_LEFT = 1, IN_RIGHT = 2, IN_UP = 4, IN_DOWN = 8,
+    IN_J = 16, IN_K = 32, IN_L = 64, IN_SPACE = 128, IN_DODGE = 256
 };
-
-#pragma pack(push, 1)
-struct NetPacket {
-    unsigned int magic;
-    unsigned char type;
-    unsigned int sequence;
-    float x, y;
-    float vx, vy;
-    int hp;
-    int state;
-    int dir;
-    int data1;
-    int data2;
-};
-#pragma pack(pop)
 
 struct FrameData {
     int startup;
@@ -138,6 +125,232 @@ static const char* CHARA_TITLES[CHARA_COUNT][2] = {
     { "ノーガードの達人",   "全てを見切る男" }
 };
 
+// ----------------------------------------------------
+// キャラ別ストーリー
+// ----------------------------------------------------
+static const char* STORY_PROLOGUE[CHARA_COUNT][3] = {
+    { "町内会の空手師範・大乗殿力也。",
+      "「世界格闘チャンピオンシップ」の招待状が回覧板に挟まっていた。",
+      "町内の平和と、公民館の雨漏り修理のため――いざ参る！" },
+    { "罠太郎は、人をイラつかせることに人生を懸けた男。",
+      "大会のルールブックに『罠禁止』とは書いていなかった。",
+      "「勝つのはオレじゃない。相手が勝手に負けるのさ」" },
+    { "ヨガの修行で手足が伸びるようになったアナンダ。",
+      "伸びすぎた手足を『縮める方法』を知る者が大会にいるという。",
+      "「伸びるのは得意。縮むのは…修行が足りない」" },
+    { "夏の夜、スイカ畑を荒らす覆面男・いのししマン。",
+      "優勝賞品が『一生分のスイカ』だと聞き、勢いで参戦した。",
+      "「止まり方？ 知らん！ 全部サイコロが決める!!」" },
+    { "元大横綱・メガトン大前。引退後は物干し竿の訪問販売員。",
+      "「この竿の頑丈さを世界に見せつければ、売上倍増でごわす」",
+      "空振りの隙など気にしない。当たれば勝ちでごわす。" },
+    { "商店街の自警団長・望月ママ。",
+      "アーケードの修理費を稼ぐため、パイプ椅子を手に立ち上がった。",
+      "「タイムセールまでに終わらせるわよ！」" },
+    { "数百年の眠りから覚めた武神・天輪太子。",
+      "封印の影響で力の大半を失い、体は脆くなっている。",
+      "「それでも――最強を名乗る者がいるなら、確かめずにはいられない」" },
+    { "蹴り技一筋40年、町道場の吉田。",
+      "「手は使わん。足だけで十分だ」が口癖。",
+      "息子に『父さんの蹴りが世界一』と証明するため、大会に挑む。" },
+    { "『ノーガード戦法』を研究する男・無防備たけし。",
+      "自分からは殴らない。相手が痺れを切らすのを待つだけ。",
+      "「さあ、打ってきなよ。……全部見えてるからさ」" }
+};
+
+static const char* STORY_ENDING[CHARA_COUNT][3] = {
+    { "大会を制した力也は、賞金で公民館の屋根を直した。",
+      "子どもたちの間で空手が大流行し、道場は満員に。",
+      "「押忍！ 次は町内運動会で会おう！」" },
+    { "優勝した罠太郎は、表彰式の会場にも罠を仕掛けていた。",
+      "司会者が転び、来賓が転び、最後に自分も転んだ。",
+      "「…イラッとしたぜ。これがオレの罠の味か」" },
+    { "優勝したアナンダは、ついに『縮む』秘伝を授かった。",
+      "しかし縮みすぎて、今度は5cmになってしまった。",
+      "「…修行は、まだ続く」" },
+    { "優勝賞品の『一生分のスイカ』が届いた。",
+      "量が多すぎて、いのししマンは村中に配って回った。",
+      "村人たちは彼を『スイカの神』と呼ぶようになった。" },
+    { "決勝で振り回した物干し竿は『折れない竿』として大ヒット。",
+      "大前の訪問販売は予約3年待ちになった。",
+      "「竿は振ってナンボでごわす」" },
+    { "望月ママは優勝賞金で商店街のアーケードを修理した。",
+      "シャッター街は活気を取り戻し、特売日は大行列。",
+      "「さあ、タイムセールに間に合ったわよ！」" },
+    { "天輪太子は、封印された体のまま全ての強者を下した。",
+      "「力を失っても、技は残る。それを確かめたかった」",
+      "彼は再び眠りにつく。次の時代の強者を楽しみにしながら。" },
+    { "吉田の蹴りは世界一と認められた。",
+      "表彰台で息子が叫ぶ。「父さん、最強！」",
+      "吉田は照れ隠しに、トロフィーを蹴り上げてキャッチした。" },
+    { "たけしは一度も自分から攻めずに優勝した。",
+      "観客は困惑し、対戦相手は全員イライラしていた。",
+      "「だから言ったでしょ。全部見えてるって」" }
+};
+
+static const char* STORY_ENDING_SECRET[CHARA_COUNT] = {
+    "黒閃の噂は海を越え、世界中から挑戦者が公民館を訪れるようになった。",
+    "伝説の始祖すら苛立たせた男として、『罠の帝王』の名が刻まれた。",
+    "天輪太子は笑った。「伸び縮みは心のままに」――アナンダは解脱した。",
+    "サイコロは最後まで6を出し続けた。天運は猪突猛進する者に味方する。",
+    "天輪太子もひと竿購入した。武神のお墨付きで、売上はさらに倍に。",
+    "伝説の始祖にすら「おかん」と呼ばれ、商店街の守り神となった。",
+    "かつての自分自身すら超えたその拳は、『武神そのもの』と讃えられた。",
+    "伝説の始祖の神速すら蹴り落とした右脚は『伝説の右脚』と呼ばれる。",
+    "武神の拳すら見切ったたけしに、天輪太子が弟子入りを申し出た。"
+};
+
+// ----------------------------------------------------
+// コマンドリスト（TABで表示）
+// ----------------------------------------------------
+static const int CMD_LINES = 9;
+static const char* CMD_LIST[CHARA_COUNT][CMD_LINES] = {
+    { "J / J→J　　正拳突き → 追い突き（ヒット時のみ2段目）",
+      "K　　　　　気弾（中距離けん制）",
+      "L　　　　　昇天脚（相手を打ち上げ、自分も跳ぶ）",
+      "空中J　　　空中突き / 空中L　急降下蹴り",
+      "J+K　　　　ローリングソバット（体力25%以下でドラゴンスープレックス）",
+      "空中J+K　　天翔・金剛螺旋脚",
+      "空中J中にJ+K　黒閃・真極点昇天破（最大火力・KOで特殊演出）",
+      "特性: コンボでSPが溜まりやすい",
+      NULL },
+    { "J / J→J　　ぺちっと叩く（近接は激弱）",
+      "K　　　　　足元に罠を落として後ろへ逃げる",
+      "L　　　　　罠を放り投げる（直撃で小ダメ・外れても着地点に設置）",
+      "空中L　　　真下に罠を落とす",
+      "J+K　　　　大特価!! 罠バラまきセール（罠を5個ばらまく）",
+      "罠: バナナ=スリップ / レゴ=激痛よろけ / コーン=転倒",
+      "罠は1人4個まで。踏むたびにSP回収＆COMのイライラ度UP",
+      "イライラしたCOMはガードが雑になり、大技を振りがちになる",
+      NULL },
+    { "J / J→J　　伸びる突き（先端ヒットで1.5倍）",
+      "K　　　　　伸びる足払い（先端ヒットで1.5倍）",
+      "L　　　　　ヨガ突進（打ち上げ）",
+      "空中J / 空中L　伸びる蹴り下ろし",
+      "J+K　　　　ブラフマン・クンダリニー（8方向に気弾）",
+      "注意: 手足を伸ばしている間は、手足にもやられ判定がある",
+      NULL, NULL, NULL },
+    { "J / K / L　どれでも突進！ 押すとサイコロが回る",
+      "回転中にもう一度ボタン＝目押し（緑ゾーンで成功率UP）",
+      "出目1: 小転倒　2: つまずき（どちらも短い隙）",
+      "出目3: 様子見突進（ガード可） 4: 全力突進（ガード可）",
+      "出目5: ガード不能突進　6: 超高速ガード不能＋強烈な吹っ飛び",
+      "J+K　　　　確変!! 出目6確定の突進",
+      "突進はどれも吹っ飛ばしが強く、画面端なら壁バウンドする",
+      NULL, NULL },
+    { "J / J→J　　竿の石突き（近距離）",
+      "K　　　　　横薙ぎ（画面半分まで届く・発生遅め）",
+      "L　　　　　振り下ろし（打ち上げ）",
+      "J+K　　　　電柱フルスイング（画面全体・ジャンプでかわせる）",
+      "空振りすると約1秒の大スキ。振るか、見切られるか！",
+      "跳躍不可。歩きは遅いがダッシュ(AA/DD)で間合いを詰める",
+      NULL, NULL, NULL },
+    { "J　　　　　パイプ椅子ではたく",
+      "L　　　　　椅子振り上げ（打ち上げ）",
+      "※CPU専用キャラ（トレーニングのダミーで選べます）",
+      NULL, NULL, NULL, NULL, NULL, NULL },
+    { "J / J→J　　神速拳",
+      "K　　　　　瞬動（無敵で突っ込む）",
+      "L　　　　　天輪掌（打ち上げ）",
+      "J+K　　　　天輪・神速百烈拳（相手の目の前に瞬間移動して連打）",
+      "封印解放版: 体力780と脆いが、全技が速く高火力",
+      NULL, NULL, NULL, NULL },
+    { "J / J→J　　ローキック → 上段回し蹴り",
+      "K　　　　　飛び横蹴り（吹っ飛ばしが強く壁バウンドを誘発）",
+      "L　　　　　サマーソルト（打ち上げ・自分も跳ぶ）",
+      "空中J　　　かかと落とし",
+      "空中L　　　旋風脚（空中で横に吹っ飛ばす）",
+      "J+K　　　　吉田式・百烈脚（多段ヒット）",
+      NULL, NULL, NULL },
+    { "J / J→J　　ちょい突き（リーチ・火力とも全キャラ最低）",
+      "K　　　　　当身構え（構え中に殴られると即反撃。大技ほど返しも大）",
+      "L　　　　　挑発（成功でSP+25、COMをイライラさせる）",
+      "J+K　　　　奥義・無防備の極み（約1.5秒、飛び道具も含め全部返す）",
+      "SPACEタイミング押しのパリィ受付が全キャラの約3倍",
+      "パリィ成功後の一撃は2.5倍。相手が大技を振るのを待とう",
+      "※投げは当身で返せない",
+      NULL, NULL }
+};
+
+static const char* CMD_COMMON[] = {
+    "A / D　移動　　AA / DD　ダッシュ（後ろ方向はバックダッシュ・一瞬無敵）",
+    "W　ジャンプ　　空中でW　2段ジャンプ　　空中でSS　急降下",
+    "空中でAA / DD　空中ダッシュ（1回）",
+    "SPACE長押し　ガード（削りダメージ・ガード硬直あり）",
+    "SPACEをタイミングよく単押し　パリィ（成功で相手がピヨる・SP+20）",
+    "  ※パリィの受付が切れても押しっぱなしならそのままガードに移行",
+    "I / 左Shift　回避（無敵ロール。A/Dで向きを指定）",
+    "前 + J　投げ（ガードを崩せる）　　J + K　超必殺技（SP100）",
+    "被弾中にSPACE　バースト＝コンボ抜け（SP50・再使用4秒）",
+    "壁バウンド: 画面端で強い吹っ飛ばし技を当てると跳ね返る（追撃1回・火力70%）",
+    "TAB　コマンドリストを開く/閉じる",
+    NULL
+};
+
+static const char* CMD_TRAINING[] = {
+    "1-6（テンキー可）　ダミーの行動を切り替え",
+    "  1:停止  2:立ちガード  3:しゃがみガード",
+    "  4:ランダムジャンプ  5:ランダムガード  6:CPU行動（反撃あり）",
+    "F1 当たり判定表示　F2 フレーム表示　F3 入力履歴表示",
+    "F4 SP・スタミナ無限　F5 位置リセット　F7 画面端に配置",
+    "F6 次のコンボ課題",
+    "判定表示: 青枠=やられ判定 / 赤=攻撃判定 / 黄枠=投げ判定",
+    "フレーム: 発生=攻撃が出るまで / 持続=判定が出ている間 / 硬直=戻りの隙",
+    "ガード時の不利が相手の最速技より大きいと「確定反撃あり」",
+    "ESC　トレーニング設定に戻る",
+    NULL
+};
+
+// ----------------------------------------------------
+// コンボ課題（トレーニング）
+// ----------------------------------------------------
+enum ComboTag {
+    TAG_SHOT = 100,
+    TAG_TRAP,
+    TAG_WALL,
+    TAG_COUNTER,
+    TAG_COUNTER_SUPER,
+    TAG_PARRY,
+    TAG_DICE6
+};
+
+struct ComboChallenge {
+    const char* desc;
+    int tags[4];
+    int tagCount;
+    const char* hint;
+};
+
+static const ComboChallenge CHALLENGES[CHARA_COUNT][3] = {
+    { { "J → J の2連撃", { ACT_LIGHT1, ACT_LIGHT2 }, 2, "J がヒットした直後にもう一度 J" },
+      { "L で打ち上げ → 空中J", { ACT_SKILL_ATTACK, ACT_AIR_LIGHT }, 2, "L で一緒に跳び上がり、空中で J" },
+      { "空中J → J+K で黒閃", { ACT_AIR_LIGHT, ACT_SUPER_ENHANCED }, 2, "F4 でSP無限にすると練習しやすい" } },
+    { { "罠投げ(L)を直撃させる", { TAG_SHOT }, 1, "相手から3キャラ分ほど離れて L" },
+      { "罠を踏ませてから J", { TAG_TRAP, ACT_LIGHT1 }, 2, "ダミーを 6:CPU行動 にすると罠に向かって歩いてくる" },
+      { "罠バラまき(J+K)で2ヒット", { TAG_SHOT, TAG_SHOT }, 2, "近めの間合いで J+K" } },
+    { { "J → J の2連撃", { ACT_LIGHT1, ACT_LIGHT2 }, 2, "先端を当てると威力1.5倍" },
+      { "L で打ち上げ → 空中J", { ACT_SKILL_ATTACK, ACT_AIR_LIGHT }, 2, "L の後すぐジャンプして J" },
+      { "J+K の気弾で2ヒット", { TAG_SHOT, TAG_SHOT }, 2, "密着で J+K" } },
+    { { "突進を当てる", { ACT_BOAR_CHARGE }, 1, "J/K/L で突進。回転中にもう一度押すと目押し" },
+      { "突進で壁バウンド", { ACT_BOAR_CHARGE, TAG_WALL }, 2, "F7 で画面端に配置してから突進" },
+      { "出目6の突進を当てる", { TAG_DICE6 }, 1, "目押し成功で高い目が出やすい" } },
+    { { "K 横薙ぎを当てる", { ACT_MID_ATTACK }, 1, "画面半分まで届く。外すと1秒の大スキ" },
+      { "横薙ぎで壁バウンド", { ACT_MID_ATTACK, TAG_WALL }, 2, "F7 で画面端に配置してから K" },
+      { "壁バウンド → L 振り下ろし", { ACT_MID_ATTACK, TAG_WALL, ACT_SKILL_ATTACK }, 3, "跳ね返ってきたところに L" } },
+    { { "J を当てる", { ACT_LIGHT1 }, 1, "" },
+      { "J → J の2連撃", { ACT_LIGHT1, ACT_LIGHT2 }, 2, "" },
+      { "L で打ち上げる", { ACT_SKILL_ATTACK }, 1, "" } },
+    { { "J → J の2連撃", { ACT_LIGHT1, ACT_LIGHT2 }, 2, "" },
+      { "L で打ち上げ → 空中J", { ACT_SKILL_ATTACK, ACT_AIR_LIGHT }, 2, "L の硬直が解けたらすぐジャンプ" },
+      { "神速百烈拳で3ヒット", { ACT_SUPER_ATTACK, ACT_SUPER_ATTACK, ACT_SUPER_ATTACK }, 3, "F4 でSP無限に" } },
+    { { "J → J の2連撃", { ACT_LIGHT1, ACT_LIGHT2 }, 2, "ローキック → 回し蹴り" },
+      { "K 飛び横蹴りで壁バウンド", { ACT_MID_ATTACK, TAG_WALL }, 2, "F7 で画面端に配置" },
+      { "L サマーソルト → 空中J", { ACT_SKILL_ATTACK, ACT_AIR_LIGHT }, 2, "一緒に跳んでかかと落とし" } },
+    { { "パリィ成功 → J", { TAG_PARRY, ACT_LIGHT1 }, 2, "ダミーを 6:CPU行動 に。攻撃に合わせて SPACE" },
+      { "当身(K)を成功させる", { TAG_COUNTER }, 1, "ダミー 6:CPU行動 の攻撃を K で待つ" },
+      { "極当身(J+K)を成功させる", { TAG_COUNTER_SUPER }, 1, "F4 でSP無限に" } }
+};
+
 struct CpuBossData {
     const char* name;
     const char* alias;
@@ -156,6 +369,7 @@ static const CpuBossData CPU_ROSTER[6] = {
     { "ヴィシュヌヴァルダン・チャクラヴァルティー", "全宇宙の輪廻を統べる絶対無上の大阿羅漢", 2, 9, 8, 4, "我が解脱の境地に一撃を入れるとは…見事。" },
     { "真・天輪太子",                       "武神降臨・伝説の始祖",               6, 10, 9, 3, "……見事だ。数百年ぶりに全力を出せたよ。" }
 };
+static const CpuBossData TRAINING_BOSS = { "ダミー", "", 0, 5, 3, 0, "" };
 static const int LAST_STAGE = 5;
 
 struct StageDefinition {
@@ -179,10 +393,20 @@ struct StageGimmick {
     int activeHitBox;
     int stageTimer;
     bool hazardActive;
+    bool hazardWarning;
+    int hazardCountdown;
     float itemX, itemY;
     bool itemActive;
 };
 static StageGimmick g_gimmick;
+static bool g_gimmickEnabled = true;
+static int g_currentStageIdx = 0;
+
+// 感電床：7秒周期。3秒の予告点滅 → 1秒通電
+static const int HAZARD_PERIOD = 420;
+static const int HAZARD_WARN_START = 180;
+static const int HAZARD_ACTIVE_START = 360;
+static const float HAZARD_SAFE_HALF = 70.0f;   // 感電コンテナ周辺の安全地帯（ゴムマット）
 
 static const int MAX_CHARA_SLOTS = 12;
 
@@ -324,16 +548,63 @@ struct Fighter {
     bool boarSuper;        // いのしし確定突進
     int diceFace;
     int diceShowTimer;
+    int boarTiming;        // 0:未入力 1:目押し成功 2:ズレ
     bool whiffChecked;     // 大前の空振り判定済み
     int trapCycle;
+    int guardStun;         // ガード硬直
+    bool crouching;        // しゃがみ（トレーニングのダミー用）
 };
 
 static Fighter g_me;
 static Fighter g_other;
 
+// 試合後の統計（0 = 自分 / 1 = 相手）
+struct MatchStats {
+    int moves;
+    int hits;
+    int taken;
+    int guards;
+    int parries;
+    int maxCombo;
+    int damage;
+};
+static MatchStats g_stats[2];
+static int g_moveUse[2][ACT_STATE_COUNT];
+
+// フレーム表示用
+struct MoveInfo {
+    bool valid;
+    int chara;
+    ActionState state;
+    int startup, active, recovery, total;
+};
+static MoveInfo g_moveInfo[2];
+
+struct AdvantageInfo {
+    bool valid;
+    bool byDummy;
+    bool guarded;
+    bool launch;
+    bool punishable;
+    int adv;
+    int chara;
+    ActionState state;
+};
+static AdvantageInfo g_adv;
+
+// 入力のエッジ・2度押し判定
+struct ControlState {
+    unsigned short held;
+    unsigned short pressed;
+    unsigned short dbl;
+    int lastTap[4];
+};
+static ControlState g_ctrl[2];
+
 // 超必殺技・黒閃・パチンコ演出用変数
 static int g_superCutinTimer = 0;
 static const char* g_superCutinName = "";
+static char g_netCutinText[96] = "";
 static bool g_superIsUltimate = false;
 static bool g_cutinIsCounter = false;    // 当身・極パリィ用のカットイン
 static int g_kokusenStrobe = 0;          // 黒閃・空間反転ストロボタイマー
@@ -345,15 +616,114 @@ static int g_flashTimer = 0;             // 当身成功時の白フラッシュ
 static int g_cpuTilt = 0;
 static int g_cpuTiltTimer = 0;
 
+// ----------------------------------------------------
+// 通信対戦（ホストが全て計算し、クライアントは入力送信と表示のみ）
+// ----------------------------------------------------
+enum PacketType {
+    PKT_HELLO = 1,
+    PKT_SETUP,
+    PKT_CHARA,
+    PKT_INPUT,
+    PKT_SNAPSHOT
+};
+
+enum NetPhase { NP_READY, NP_FIGHT, NP_ROUND_END, NP_MATCH_END };
+
+#pragma pack(push, 1)
+struct NetHeader {
+    unsigned int magic;
+    unsigned char type;
+    unsigned short len;
+};
+struct NetSetup {
+    unsigned char stage;
+    unsigned char roundsToWin;
+    unsigned char timeLimit;    // 0 = 無制限
+    unsigned char gimmickOn;
+};
+struct NetCharaMsg {
+    unsigned char chara;
+};
+struct NetInputMsg {
+    unsigned int seq;
+    unsigned short bits;
+};
+struct NetFighter {
+    float x, y, vx, vy;
+    short hp, maxHp;
+    unsigned char state;
+    signed char dir;
+    unsigned char chara;
+    unsigned char flags;
+    short animTimer, stateTimer;
+    unsigned char sp, stamina, diceFace, diceShowTimer, stanceLevel, comboCount, comboDisplayTimer;
+    signed char moveDir;
+    unsigned char boarTiming, guardStun;
+};
+struct NetShot {
+    float x, y;
+    unsigned int color;
+    unsigned char type, sub, radius, fromA;
+};
+struct NetTrap {
+    float x;
+    unsigned char type, ownerA;
+    short life, armDelay;
+};
+struct NetFxEvent {
+    short x, y;
+    unsigned int color;
+    unsigned char count, kind, len;
+};
+struct NetPopupEvent {
+    short x, y;
+    unsigned int color;
+    char text[48];
+};
+struct NetStats {
+    short moves, hits, taken, guards, parries, maxCombo;
+    int damage;
+};
+static const int NET_MAX_FX = 12;
+static const int NET_MAX_POPUPS = 6;
+struct NetSnapshot {
+    unsigned int frame;
+    NetFighter a, b;
+    unsigned char shotCount;
+    NetShot shots[MAX_SHOTS];
+    unsigned char trapCount;
+    NetTrap traps[MAX_TRAPS];
+    float gx, gFallAngle, itemX;
+    short ghp, gmaxHp;
+    unsigned char gFlags;
+    signed char gDir;
+    int gStageTimer;
+    signed char roundTime;
+    unsigned char readyTimer, phase, phaseTimer, roundsA, roundsB, roundNo, winner;
+    unsigned char cutinTimer, cutinFlags;
+    char cutinText[96];
+    unsigned char shake, flash, strobe, parryNotice, kokusen;
+    NetStats statsA, statsB;
+    unsigned char fxCount;
+    NetFxEvent fx[NET_MAX_FX];
+    unsigned char popupCount;
+    NetPopupEvent popups[NET_MAX_POPUPS];
+};
+#pragma pack(pop)
+
 static SOCKET g_listen = INVALID_SOCKET;
 static SOCKET g_peer = INVALID_SOCKET;
 static bool g_is_host = false;
 static bool g_is_net_battle = false;
 static unsigned int g_sequence = 0;
-static char g_rx[sizeof(NetPacket) * 32];
+static char g_rx[65536];
 static int g_rx_used = 0;
+static char g_tx[65536];
+static int g_tx_used = 0;
 
-static int g_selectedNetStage = 0;
+static NetSetup g_netRules = { 0, 2, 99, 1 };
+static int g_netRuleRow = 0;
+static bool g_netRulesReceived = false;
 static int g_myNetChara = 0;
 static int g_enemyNetChara = 1;
 static int g_netCharaCursor = 0;
@@ -362,6 +732,22 @@ static bool g_enemyNetReady = false;
 static char g_net_status[256] = "";
 static int g_net_room_code = 0;
 static char g_client_ip_input[64] = "127.0.0.1";
+
+static NetPhase g_netPhase = NP_READY;
+static int g_netPhaseTimer = 0;
+static int g_netRounds[2] = { 0, 0 };   // [0]=ホスト(A) [1]=クライアント(B)
+static int g_netRoundNo = 1;
+static int g_netWinner = 0;             // 1:A 2:B 3:引き分け
+static bool g_netGotSnapshot = false;
+static unsigned short g_remoteQueue[16];
+static int g_remoteQueueCount = 0;
+static unsigned short g_remoteBits = 0;
+static bool g_netRecordFx = false;
+static NetFxEvent g_netFxQueue[NET_MAX_FX];
+static int g_netFxCount = 0;
+static NetPopupEvent g_netPopupQueue[NET_MAX_POPUPS];
+static int g_netPopupCount = 0;
+static unsigned int g_netFrame = 0;
 
 static int g_readyFightTimer = 0;
 static int g_battleTimerFrames = 0;
@@ -388,22 +774,161 @@ static int g_unlockBannerTimer = 0;
 static int g_unlockBannerChara = -1;
 static int g_lockedMsgTimer = 0;
 
+// キーボード
+static char g_keyNow[256];
+static char g_keyPrev[256];
+
+// コマンドリスト
+static bool g_cmdListOpen = false;
+static int g_cmdListChara = 0;
+static int g_cmdListPage = 0;
+
+// ----------------------------------------------------
+// トレーニングモード
+// ----------------------------------------------------
+enum DummyMode {
+    DUMMY_STOP,
+    DUMMY_STAND_GUARD,
+    DUMMY_CROUCH_GUARD,
+    DUMMY_RANDOM_JUMP,
+    DUMMY_RANDOM_GUARD,
+    DUMMY_CPU,
+    DUMMY_MODE_COUNT
+};
+static const char* DUMMY_MODE_NAMES[DUMMY_MODE_COUNT] = {
+    "停止", "立ちガード", "しゃがみガード", "ランダムジャンプ", "ランダムガード", "CPU行動"
+};
+
+static int g_trainMyChara = 0;
+static int g_trainDummyChara = 0;
+static int g_trainStage = 0;
+static int g_trainRow = 0;
+static DummyMode g_dummyMode = DUMMY_STOP;
+static bool g_showHitbox = true;
+static bool g_showFrames = true;
+static bool g_showInput = true;
+static bool g_infiniteSp = false;
+static int g_challengeIdx = 0;
+static bool g_challengeDone[3] = { false, false, false };
+static bool g_challengeHitThisCombo = false;
+static int g_comboLog[32];
+static int g_comboLogCount = 0;
+static int g_comboDmg = 0;
+static int g_comboHits = 0;
+static int g_lastComboDmg = 0;
+static int g_lastComboHits = 0;
+static int g_maxComboDmg = 0;
+static int g_maxComboHits = 0;
+static int g_dummyNeutralFrames = 0;
+static int g_meNeutralFrames = 0;
+
+struct InputHistEntry {
+    unsigned short bits;
+    int frames;
+};
+static const int INPUT_HIST_MAX = 16;
+static InputHistEntry g_inputHist[INPUT_HIST_MAX];
+static int g_inputHistCount = 0;
+
+// ----------------------------------------------------
+// 共通ユーティリティ
+// ----------------------------------------------------
+static int ClampI(int v, int lo, int hi) { return (v < lo) ? lo : ((v > hi) ? hi : v); }
+
+static bool IsHitState(ActionState s) { return s == ACT_HIT || s == ACT_AIR_HIT; }
+
+static bool IsAttackState(ActionState s) {
+    return (s >= ACT_THROW && s <= ACT_SUPER_ENHANCED) || s == ACT_BOAR_CHARGE;
+}
+
+static int FighterIndex(const Fighter& f) { return (&f == &g_me) ? 0 : 1; }
+
+static bool KeyDown(int k) { return g_keyNow[k] != 0; }
+static bool KeyHit(int k) { return g_keyNow[k] != 0 && g_keyPrev[k] == 0; }
+
+static unsigned short ReadLocalBits() {
+    unsigned short b = 0;
+    if (KeyDown(KEY_INPUT_A)) b |= IN_LEFT;
+    if (KeyDown(KEY_INPUT_D)) b |= IN_RIGHT;
+    if (KeyDown(KEY_INPUT_W)) b |= IN_UP;
+    if (KeyDown(KEY_INPUT_S)) b |= IN_DOWN;
+    if (KeyDown(KEY_INPUT_J)) b |= IN_J;
+    if (KeyDown(KEY_INPUT_K)) b |= IN_K;
+    if (KeyDown(KEY_INPUT_L)) b |= IN_L;
+    if (KeyDown(KEY_INPUT_SPACE)) b |= IN_SPACE;
+    if (KeyDown(KEY_INPUT_I) || KeyDown(KEY_INPUT_LSHIFT)) b |= IN_DODGE;
+    return b;
+}
+
+static const int DOUBLE_TAP_FRAMES = 14;
+
+static void ResetControl(ControlState& cs) {
+    cs.held = cs.pressed = cs.dbl = 0;
+    for (int i = 0; i < 4; i++) cs.lastTap[i] = -1000;
+}
+
+static void UpdateControl(ControlState& cs, unsigned short bits) {
+    cs.pressed = (unsigned short)(bits & ~cs.held);
+    cs.dbl = 0;
+    for (int b = 0; b < 4; b++) {
+        unsigned short bit = (unsigned short)(1 << b);
+        if (!(cs.pressed & bit)) continue;
+        if (g_frameCount - cs.lastTap[b] <= DOUBLE_TAP_FRAMES) {
+            cs.dbl |= bit;
+            cs.lastTap[b] = -1000;
+        }
+        else {
+            cs.lastTap[b] = g_frameCount;
+        }
+    }
+    cs.held = bits;
+}
+
+// ----------------------------------------------------
+// 通信（低レベル）
+// ----------------------------------------------------
 static void SetNonBlocking(SOCKET s) { u_long on = 1; ioctlsocket(s, FIONBIO, &on); }
 static void CloseSocket(SOCKET& s) { if (s != INVALID_SOCKET) { closesocket(s); s = INVALID_SOCKET; } }
 
 static void StopNetwork(const char* message) {
     CloseSocket(g_peer);
     CloseSocket(g_listen);
+    g_tx_used = 0;
+    g_rx_used = 0;
     g_mode = MODE_NET_ERROR;
     sprintf_s(g_net_status, "%s (Escでメニューへ戻る)", message);
 }
 
-static int ClampI(int v, int lo, int hi) { return (v < lo) ? lo : ((v > hi) ? hi : v); }
+static void FlushSend() {
+    if (g_peer == INVALID_SOCKET || g_tx_used == 0) return;
+    int n = send(g_peer, g_tx, g_tx_used, 0);
+    if (n == SOCKET_ERROR) {
+        if (WSAGetLastError() != WSAEWOULDBLOCK) StopNetwork("送信エラー");
+        return;
+    }
+    memmove(g_tx, g_tx + n, g_tx_used - n);
+    g_tx_used -= n;
+}
 
-static bool IsHitState(ActionState s) { return s == ACT_HIT || s == ACT_AIR_HIT; }
+static void SendPacket(unsigned char type, const void* data, int len) {
+    if (g_peer == INVALID_SOCKET) return;
+    NetHeader h = { MAGIC, type, (unsigned short)len };
+    if (g_tx_used + (int)sizeof(h) + len > (int)sizeof(g_tx)) {
+        StopNetwork("送信が詰まりました（回線が遅すぎます）");
+        return;
+    }
+    memcpy(g_tx + g_tx_used, &h, sizeof(h));
+    g_tx_used += sizeof(h);
+    if (len > 0) {
+        memcpy(g_tx + g_tx_used, data, len);
+        g_tx_used += len;
+    }
+    FlushSend();
+}
 
 static FrameData GetFrameData(int charaIdx, ActionState st) {
     if (st == ACT_BOAR_CHARGE) return { 0, 999, 0 };
+    if (st == ACT_COUNTER_STANCE) return { 2, 31, 0 };
 
     // キャラ固有の発生・持続
     if (charaIdx == 4) {
@@ -440,11 +965,33 @@ static FrameData GetFrameData(int charaIdx, ActionState st) {
     }
 }
 
+// いのししマンのサイコロ出目ごとの突進性能
+struct BoarFace {
+    float speed;
+    int duration;
+    int damage;
+    bool unblockable;
+    float knockX;
+    const char* label;
+};
+static const BoarFace BOAR_FACES[7] = {
+    { 0.0f,  0,   0, false,  0.0f, "" },
+    { 0.0f,  0,   0, false,  0.0f, "1: ズコッ… 小転倒" },
+    { 0.0f,  0,   0, false,  0.0f, "2: つまずいた!" },
+    { 13.0f, 20, 120, false,  7.0f, "3: 様子見突進（ガード可）" },
+    { 16.0f, 26, 150, false,  9.0f, "4: 全力突進（ガード可）" },
+    { 17.0f, 30, 165, true,  10.0f, "5: ガード不能突進!!" },
+    { 20.0f, 34, 210, true,  13.0f, "6: 大当たり!! 超高速ガード不能!!" }
+};
+static const int BOAR_ROLL_FRAMES = 30;
+static const int BOAR_TIMING_START = 20;
+static const int BOAR_TIMING_END = 25;
+
 static void InitMasterData() {
     CHARA_PROFILES[0] = { "大乗殿 力也",   "【町内会代表】 (本格空手道)",               "空N>空SPで黒閃覚醒 / SP技はノースタミナ",          5.0f, -14.0f, 1000, RED,    ORANGE, 1, 9.5f };
     CHARA_PROFILES[1] = { "罠太郎",        "【イライラ製造職人】 (罠設置・逃げ回り)",   "K:足元に罠設置 L:罠投げ(着地で設置) / 近接は激弱", 4.6f, -13.0f,  900, YELLOW, ORANGE, 1, 10.0f };
     CHARA_PROFILES[2] = { "アナンダ・シャンカラン", "【ヨガマスター】 (伸縮肢体・軟体浮遊)", "手足の先端ヒットで威力1.5倍 / 隙に被弾判定有",     5.4f, -14.5f,  880, CYAN,   WHITE,  1, 9.0f };
-    CHARA_PROFILES[3] = { "いのししマン",  "【畑を荒らすスイカ泥棒】 (運任せ猪突猛進)", "J/K/L全部が突進! サイコロで ガード不能 or 大転倒", 4.6f, -13.2f,  980, GetColor(150, 95, 55), GREEN, 1, 10.0f };
+    CHARA_PROFILES[3] = { "いのししマン",  "【畑を荒らすスイカ泥棒】 (運と腕の猪突猛進)", "J/K/L全部が突進! 目押しで高い出目を狙え",        4.6f, -13.2f,  980, GetColor(150, 95, 55), GREEN, 1, 10.0f };
     CHARA_PROFILES[4] = { "メガトン大前",  "【元大横綱の物干し竿使い】 (超リーチ・跳躍不可)", "K:画面半分届く横薙ぎ L:振り下ろし / 空振り大スキ", 2.6f, 0.0f, 1400, ORANGE, RED, 1, 6.0f };
     CHARA_PROFILES[5] = { "望月ママ",      "【商店街の自警団長】 (パイプ椅子乱舞)",     "強引な椅子制圧と猛突進 / J:通常 K:中距離 L:戦技",  4.8f, -13.5f, 1150, BLUE,   WHITE,  99, 9.0f };
     CHARA_PROFILES[6] = { "真・天輪太子",  "【武神降臨】 (封印解放・上級者向け)",       "体力激減の代わりに神速・高火力 / K:瞬動(無敵)",    5.6f, -15.0f, 1500, WHITE,  YELLOW, 3, 13.0f };
@@ -550,14 +1097,22 @@ static int GetCurrentLap() {
     return g_slots[g_currentSlot].loopCount + 1;
 }
 
-// 周回難易度（2周目で+1、最大+5）
+// 周回難易度（2周目で+1、最大+5）。ストーリー以外では0
 static int GetHardLevel() {
-    if (g_is_net_battle) return 0;
+    if (g_is_net_battle || g_mode == MODE_TRAINING || g_mode == MODE_TRAINING_SELECT) return 0;
     return ClampI(GetCurrentLap() - 1, 0, 5);
 }
 
 static bool IsCharaUnlocked(int c) {
     return CHARA_PROFILES[c].unlockLap <= GetCurrentLap();
+}
+
+// どれかのセーブデータで解放済みならトレーニングで使える
+static bool IsCharaUnlockedAnySlot(int c) {
+    for (int i = 0; i < 3; i++) {
+        if (CHARA_PROFILES[c].unlockLap <= g_slots[i].loopCount + 1) return true;
+    }
+    return false;
 }
 
 static int RosterPosOf(int c) {
@@ -578,7 +1133,17 @@ static void TriggerScreenShake(int frames) {
     g_screenShakeTimer = frames;
 }
 
+static void QueueNetFx(float x, float y, unsigned int col, int count, int kind, float len) {
+    if (!g_netRecordFx || g_netFxCount >= NET_MAX_FX) return;
+    NetFxEvent& e = g_netFxQueue[g_netFxCount++];
+    e.x = (short)x; e.y = (short)y; e.color = col;
+    e.count = (unsigned char)ClampI(count, 0, 255);
+    e.kind = (unsigned char)kind;
+    e.len = (unsigned char)ClampI((int)len, 0, 255);
+}
+
 static void SpawnHitFX(float x, float y, unsigned int col, int count) {
+    QueueNetFx(x, y, col, count, 0, 0);
     for (int i = 0; i < count; i++) {
         for (int p = 0; p < MAX_FX; p++) {
             if (!g_fx[p].active) {
@@ -598,6 +1163,7 @@ static void SpawnHitFX(float x, float y, unsigned int col, int count) {
 }
 
 static void SpawnSparks(float x, float y, unsigned int col, int count, float baseLen) {
+    QueueNetFx(x, y, col, count, 1, baseLen);
     for (int i = 0; i < count; i++) {
         for (int s = 0; s < MAX_SPARKS; s++) {
             if (!g_sparks[s].active) {
@@ -615,12 +1181,17 @@ static void SpawnSparks(float x, float y, unsigned int col, int count, float bas
 }
 
 static void SpawnPopup(float x, float y, const char* text, unsigned int col) {
+    if (g_netRecordFx && g_netPopupCount < NET_MAX_POPUPS) {
+        NetPopupEvent& e = g_netPopupQueue[g_netPopupCount++];
+        e.x = (short)x; e.y = (short)y; e.color = col;
+        strncpy_s(e.text, text, _TRUNCATE);
+    }
     for (int i = 0; i < MAX_POPUPS; i++) {
         if (!g_popups[i].active) {
             g_popups[i].active = true;
             g_popups[i].x = x;
             g_popups[i].y = y;
-            strcpy_s(g_popups[i].text, text);
+            strncpy_s(g_popups[i].text, text, _TRUNCATE);
             g_popups[i].color = col;
             g_popups[i].life = 55;
             return;
@@ -649,129 +1220,127 @@ static void SpawnShot(bool fromMe, float x, float y, float vx, float vy, int dmg
     }
 }
 
-static bool SendFighterPacket(unsigned char type, float x, float y, float vx, float vy, int hp, int st, int dir, int d1, int d2 = 0) {
-    if (g_peer == INVALID_SOCKET) return false;
-    NetPacket p = { MAGIC, type, ++g_sequence, x, y, vx, vy, hp, st, dir, d1, d2 };
-    int n = send(g_peer, (const char*)&p, sizeof(p), 0);
-    return n == sizeof(p) || (n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK);
-}
-
-// ファイターが撃つ弾（自分の弾なら通信相手にも送る）
 static void FighterShot(Fighter& f, float x, float y, float vx, float vy, int dmg, unsigned int col, int rad, int type = 0, int sub = 0) {
-    bool fromMe = (&f == &g_me);
-    SpawnShot(fromMe, x, y, vx, vy, dmg, col, rad, type, sub);
-    if (fromMe && g_is_net_battle) SendFighterPacket(PKT_SPAWN_SHOT, x, y, vx, vy, dmg, sub, 0, rad, type);
+    SpawnShot(&f == &g_me, x, y, vx, vy, dmg, col, rad, type, sub);
 }
 
-static void ReceivePackets() {
-    for (;;) {
-        char incoming[512];
-        int n = recv(g_peer, incoming, sizeof(incoming), 0);
-        if (n == 0) { StopNetwork("相手が切断しました"); return; }
-        if (n == SOCKET_ERROR) {
-            int e = WSAGetLastError();
-            if (e == WSAEWOULDBLOCK) return;
-            StopNetwork("受信エラー"); return;
+// ----------------------------------------------------
+// 技名・統計
+// ----------------------------------------------------
+static const char* GetMoveName(int c, ActionState st) {
+    switch (st) {
+    case ACT_LIGHT1:         return "J 通常技";
+    case ACT_LIGHT2:         return "J→J 2段目";
+    case ACT_AIR_LIGHT:      return "空中J";
+    case ACT_AIR_KICK:       return "空中L";
+    case ACT_THROW:          return "投げ";
+    case ACT_SUPER_ATTACK:   return "超必殺技(J+K)";
+    case ACT_SUPER_AIR:      return "空中超必殺技";
+    case ACT_SUPER_ENHANCED: return "強化超必殺技";
+    case ACT_BOAR_ROLL:
+    case ACT_BOAR_CHARGE:    return "猪突猛進";
+    case ACT_COUNTER_STANCE: return "当身構え(K)";
+    case ACT_COUNTER_STRIKE: return "当身反撃";
+    case ACT_TAUNT:          return "挑発(L)";
+    case ACT_PARRY:          return "パリィ";
+    case ACT_MID_ATTACK:
+        switch (c) {
+        case 0: return "気弾(K)";
+        case 1: return "罠設置(K)";
+        case 2: return "伸びる足払い(K)";
+        case 4: return "横薙ぎ(K)";
+        case 6: return "瞬動(K)";
+        case 7: return "飛び横蹴り(K)";
+        default: return "中距離技(K)";
         }
-        if (g_rx_used + n > (int)sizeof(g_rx)) g_rx_used = 0;
-        memcpy(g_rx + g_rx_used, incoming, n);
-        g_rx_used += n;
-
-        while (g_rx_used >= (int)sizeof(NetPacket)) {
-            NetPacket p;
-            memcpy(&p, g_rx, sizeof(p));
-            memmove(g_rx, g_rx + sizeof(p), g_rx_used - sizeof(p));
-            g_rx_used -= sizeof(p);
-
-            if (p.magic != MAGIC) continue;
-
-            if (p.type == PKT_STAGE_SYNC) {
-                g_selectedNetStage = ClampI(p.data1, 0, 4);
-                g_mode = MODE_NET_CHARA_SELECT;
-            }
-            else if (p.type == PKT_CHARA_SYNC) {
-                g_enemyNetChara = ClampI(p.data1, 0, CHARA_COUNT - 1);
-                g_enemyNetReady = true;
-            }
-            else if (p.type == PKT_STATE || p.type == PKT_INPUT) {
-                g_other.x = p.x;
-                g_other.y = p.y;
-                g_other.vx = p.vx;
-                g_other.vy = p.vy;
-                g_other.hp = p.hp;
-                g_other.state = (ActionState)p.state;
-                g_other.dir = p.dir;
-            }
-            else if (p.type == PKT_SPAWN_SHOT) {
-                SpawnShot(false, p.x, p.y, p.vx, p.vy, p.hp, CHARA_PROFILES[g_other.charaIndex].specialColor, p.data1, p.data2, p.state);
-            }
+    case ACT_SKILL_ATTACK:
+        switch (c) {
+        case 0: return "昇天脚(L)";
+        case 1: return "罠投げ(L)";
+        case 2: return "ヨガ突進(L)";
+        case 4: return "振り下ろし(L)";
+        case 5: return "椅子振り上げ(L)";
+        case 6: return "天輪掌(L)";
+        case 7: return "サマーソルト(L)";
+        default: return "戦技(L)";
         }
+    default: return "-";
     }
 }
 
-static void HandleTextInput(char* buf, int maxLen, bool allowDot) {
-    if (s_keyCooldown > 0) { s_keyCooldown--; return; }
-    int len = (int)strlen(buf);
-    char pressed = 0;
-    if (CheckHitKey(KEY_INPUT_0) || CheckHitKey(KEY_INPUT_NUMPAD0)) pressed = '0';
-    else if (CheckHitKey(KEY_INPUT_1) || CheckHitKey(KEY_INPUT_NUMPAD1)) pressed = '1';
-    else if (CheckHitKey(KEY_INPUT_2) || CheckHitKey(KEY_INPUT_NUMPAD2)) pressed = '2';
-    else if (CheckHitKey(KEY_INPUT_3) || CheckHitKey(KEY_INPUT_NUMPAD3)) pressed = '3';
-    else if (CheckHitKey(KEY_INPUT_4) || CheckHitKey(KEY_INPUT_NUMPAD4)) pressed = '4';
-    else if (CheckHitKey(KEY_INPUT_5) || CheckHitKey(KEY_INPUT_NUMPAD5)) pressed = '5';
-    else if (CheckHitKey(KEY_INPUT_6) || CheckHitKey(KEY_INPUT_NUMPAD6)) pressed = '6';
-    else if (CheckHitKey(KEY_INPUT_7) || CheckHitKey(KEY_INPUT_NUMPAD7)) pressed = '7';
-    else if (CheckHitKey(KEY_INPUT_8) || CheckHitKey(KEY_INPUT_NUMPAD8)) pressed = '8';
-    else if (CheckHitKey(KEY_INPUT_9) || CheckHitKey(KEY_INPUT_NUMPAD9)) pressed = '9';
-    else if (allowDot && (CheckHitKey(KEY_INPUT_PERIOD) || CheckHitKey(KEY_INPUT_DECIMAL))) pressed = '.';
-
-    if (pressed != 0 && len < maxLen - 1) {
-        buf[len] = pressed; buf[len + 1] = '\0';
-        s_keyCooldown = 10;
-    }
-    if (CheckHitKey(KEY_INPUT_BACK)) {
-        if (len > 0) { buf[len - 1] = '\0'; s_keyCooldown = 10; }
-    }
+static void ResetMatchStats() {
+    memset(g_stats, 0, sizeof(g_stats));
+    memset(g_moveUse, 0, sizeof(g_moveUse));
 }
 
-static void StartHost() {
-    g_is_host = true;
-    g_is_net_battle = true;
-    g_net_room_code = 1000 + rand() % 9000;
-    g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (g_listen == INVALID_SOCKET) { StopNetwork("ソケット初期化失敗"); return; }
-    sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = htons(PORT);
-    if (bind(g_listen, (sockaddr*)&a, sizeof(a)) == SOCKET_ERROR || listen(g_listen, 1) == SOCKET_ERROR) {
-        StopNetwork("ポート27015開放失敗"); return;
+static const char* MostUsedMove(int idx, int chara) {
+    int best = -1, bestCount = 0;
+    for (int s = 0; s < ACT_STATE_COUNT; s++) {
+        if (g_moveUse[idx][s] > bestCount) { bestCount = g_moveUse[idx][s]; best = s; }
     }
-    SetNonBlocking(g_listen);
-    g_mode = MODE_HOST_WAIT;
+    return (best < 0) ? "なし" : GetMoveName(chara, (ActionState)best);
 }
 
-static void UpdateHostWait() {
-    SOCKET s = accept(g_listen, NULL, NULL);
-    if (s != INVALID_SOCKET) {
-        g_peer = s; SetNonBlocking(g_peer); CloseSocket(g_listen);
-        g_myNetReady = false; g_enemyNetReady = false;
-        g_mode = MODE_NET_STAGE_SELECT;
-        SendFighterPacket(PKT_HELLO, 0, 0, 0, 0, 0, 0, 0, 0);
+// ----------------------------------------------------
+// トレーニング：コンボ記録と課題判定
+// ----------------------------------------------------
+static void LogComboTag(int tag) {
+    if (g_mode != MODE_TRAINING) return;
+    if (g_comboLogCount < 32) g_comboLog[g_comboLogCount++] = tag;
+
+    const ComboChallenge& ch = CHALLENGES[g_me.charaIndex][g_challengeIdx];
+    int j = 0;
+    for (int i = 0; i < g_comboLogCount && j < ch.tagCount; i++) {
+        if (g_comboLog[i] == ch.tags[j]) j++;
+    }
+    if (j == ch.tagCount && !g_challengeHitThisCombo) {
+        g_challengeHitThisCombo = true;
+        g_challengeDone[g_challengeIdx] = true;
+        g_flashTimer = 8;
+        SpawnPopup(320, 170, "コンボ課題 達成!!", YELLOW);
     }
 }
 
-static void StartClient(const char* ip) {
-    g_is_host = false;
-    g_is_net_battle = true;
-    g_peer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (g_peer == INVALID_SOCKET) { StopNetwork("ソケット作成失敗"); return; }
-    sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = htons(PORT);
-    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) { StopNetwork("IPアドレス書式不正"); return; }
-    if (connect(g_peer, (sockaddr*)&a, sizeof(a)) == SOCKET_ERROR) { StopNetwork("接続失敗"); return; }
-    SetNonBlocking(g_peer);
-    g_myNetReady = false; g_enemyNetReady = false;
-    g_mode = MODE_NET_STAGE_SELECT;
-    SendFighterPacket(PKT_HELLO, 0, 0, 0, 0, 0, 0, 0, 0);
+static void RecordAdvantage(Fighter& atk, Fighter& def, int defStun, bool guarded, bool launch) {
+    if (g_mode != MODE_TRAINING) return;
+    g_adv.valid = true;
+    g_adv.byDummy = (&atk == &g_other);
+    g_adv.guarded = guarded;
+    g_adv.launch = launch;
+    g_adv.adv = defStun + (def.hitStop - atk.hitStop) - atk.stateTimer;
+    g_adv.chara = atk.charaIndex;
+    g_adv.state = atk.state;
+    int fastest = GetFrameData(def.charaIndex, ACT_LIGHT1).startup;
+    g_adv.punishable = guarded && g_adv.adv < 0 && -g_adv.adv > fastest;
 }
 
+static void RecordMoveInfo(Fighter& f) {
+    int i = FighterIndex(f);
+    FrameData fd = GetFrameData(f.charaIndex, f.state);
+    MoveInfo& m = g_moveInfo[i];
+    m.valid = true;
+    m.chara = f.charaIndex;
+    m.state = f.state;
+    m.total = f.stateTimer;
+    m.startup = fd.startup;
+    m.active = fd.active;
+    if (m.startup + m.active > m.total) m.active = m.total - m.startup;
+    if (m.active < 0) m.active = 0;
+    m.recovery = m.total - m.startup - m.active;
+    if (m.recovery < 0) m.recovery = 0;
+}
+
+static void RecordMoveStart(Fighter& f) {
+    int i = FighterIndex(f);
+    ActionState key = (f.state == ACT_BOAR_ROLL) ? ACT_BOAR_CHARGE : f.state;
+    g_stats[i].moves++;
+    g_moveUse[i][key]++;
+    if (f.state != ACT_BOAR_ROLL && f.state != ACT_TAUNT) RecordMoveInfo(f);
+}
+
+// ----------------------------------------------------
+// ステージ
+// ----------------------------------------------------
 static void InitStageGimmick(int stageIdx) {
     g_gimmick.x = 320.0f + (float)(rand() % 140 - 70);
     g_gimmick.y = GROUND_Y;
@@ -785,9 +1354,15 @@ static void InitStageGimmick(int stageIdx) {
     g_gimmick.activeHitBox = 0;
     g_gimmick.stageTimer = 0;
     g_gimmick.hazardActive = false;
+    g_gimmick.hazardWarning = false;
+    g_gimmick.hazardCountdown = 0;
     g_gimmick.itemActive = false;
     g_gimmick.itemX = 0;
     g_gimmick.itemY = 0;
+}
+
+static bool InHazardSafeZone(float x) {
+    return !g_gimmick.fallen && !g_gimmick.isFalling && fabsf(x - g_gimmick.x) < HAZARD_SAFE_HALF;
 }
 
 static void ResetFighter(Fighter& f, float x, int dir, int chara, int maxHp) {
@@ -809,28 +1384,15 @@ static int PlayableMaxHp(int chara) {
     return (chara == 6) ? 780 : CHARA_PROFILES[chara].maxHp;
 }
 
-static void SetupBattleRound(bool isNet = false) {
-    int curStage = isNet ? g_selectedNetStage : g_slots[g_currentSlot].stageProgress;
-    curStage = ClampI(curStage, 0, LAST_STAGE);
-    InitStageGimmick(curStage);
-
+static void ClearBattleObjects() {
     for (int i = 0; i < MAX_SHOTS; i++) g_shots[i].active = false;
     for (int i = 0; i < MAX_FX; i++) g_fx[i].active = false;
     for (int i = 0; i < MAX_SPARKS; i++) g_sparks[i].active = false;
     for (int i = 0; i < MAX_TRAPS; i++) g_traps[i].active = false;
     for (int i = 0; i < MAX_POPUPS; i++) g_popups[i].active = false;
+}
 
-    int myChara = isNet ? g_myNetChara : g_slots[g_currentSlot].chosenChara;
-    int enemyChara = isNet ? g_enemyNetChara : CPU_ROSTER[curStage].charaIndex;
-    myChara = ClampI(myChara, 0, CHARA_COUNT - 1);
-    enemyChara = ClampI(enemyChara, 0, CHARA_COUNT - 1);
-
-    ResetFighter(g_me, 160.0f, 1, myChara, PlayableMaxHp(myChara));
-
-    int enemyHp = isNet ? PlayableMaxHp(enemyChara)
-        : CHARA_PROFILES[enemyChara].maxHp + curStage * 80 + GetHardLevel() * 100;
-    ResetFighter(g_other, 480.0f, -1, enemyChara, enemyHp);
-
+static void ResetBattleGlobals() {
     g_parryNoticeTimer = 0;
     g_readyFightTimer = 0;
     g_battleTimerFrames = 0;
@@ -842,8 +1404,31 @@ static void SetupBattleRound(bool isNet = false) {
     g_kokusenStrobe = 0;
     g_isKokusenKoFinish = false;
     g_flashTimer = 0;
+    g_screenShakeTimer = 0;
     g_cpuTilt = 0;
     g_cpuTiltTimer = 0;
+    g_cmdListOpen = false;
+    ResetControl(g_ctrl[0]);
+    ResetControl(g_ctrl[1]);
+}
+
+// ストーリー用
+static void SetupBattleRound() {
+    int curStage = ClampI(g_slots[g_currentSlot].stageProgress, 0, LAST_STAGE);
+    g_currentStageIdx = curStage;
+    g_gimmickEnabled = true;
+    InitStageGimmick(curStage);
+    ClearBattleObjects();
+
+    int myChara = ClampI(g_slots[g_currentSlot].chosenChara, 0, CHARA_COUNT - 1);
+    int enemyChara = CPU_ROSTER[curStage].charaIndex;
+
+    ResetFighter(g_me, 160.0f, 1, myChara, PlayableMaxHp(myChara));
+    int enemyHp = CHARA_PROFILES[enemyChara].maxHp + curStage * 80 + GetHardLevel() * 100;
+    ResetFighter(g_other, 480.0f, -1, enemyChara, enemyHp);
+
+    ResetBattleGlobals();
+    ResetMatchStats();
 }
 
 static void AddCpuTilt(int amount) {
@@ -891,7 +1476,6 @@ static void UpdateTraps() {
 
         Fighter& victim = t.ownerIsMe ? g_other : g_me;
         Fighter& owner = t.ownerIsMe ? g_me : g_other;
-        if (g_is_net_battle && &victim != &g_me) continue;
         if (!victim.isGrounded || victim.invulFrames > 0) continue;
         if (IsHitState(victim.state) || victim.state == ACT_SLIP || victim.state == ACT_STUN || victim.state == ACT_COUNTER_STRIKE) continue;
         if (fabsf(victim.x - t.x) > 22.0f) continue;
@@ -900,6 +1484,7 @@ static void UpdateTraps() {
         victim.hasHit = false;
         victim.hitStop = 6;
         victim.stanceLevel = 0;
+        victim.guardStun = 0;
         if (t.type == TRAP_BANANA) {
             victim.state = ACT_SLIP;
             victim.stateTimer = 55;
@@ -925,21 +1510,238 @@ static void UpdateTraps() {
         TriggerScreenShake(5);
         owner.spGauge += 12; if (owner.spGauge > 100) owner.spGauge = 100;
         if (&victim == &g_other) {
-            AddCpuTilt(1);
-            SpawnPopup(victim.x + 30, victim.y - 110, "ｲﾗｯ!!", RED);
+            if (!g_is_net_battle && g_mode != MODE_TRAINING) {
+                AddCpuTilt(1);
+                SpawnPopup(victim.x + 30, victim.y - 110, "ｲﾗｯ!!", RED);
+            }
+            LogComboTag(TAG_TRAP);
         }
         t.active = false;
     }
 }
 
 // ----------------------------------------------------
-// ダメージ・当たり判定
+// 攻撃判定・やられ判定
 // ----------------------------------------------------
-static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx, float ky, bool isLauncher, bool isSmash, bool unblockable = false) {
+struct AttackBox {
+    float offX, offY, w, h;
+    int damage;
+    int stun;
+    float kx, ky;
+    bool launcher, smash, unblockable;
+};
+
+// 攻撃側の現在の技の判定（論理座標：atk.x + offX, atk.y + offY が中心）
+static bool GetAttackBox(const Fighter& atk, float distToDef, AttackBox& b) {
+    memset(&b, 0, sizeof(b));
+    b.stun = 20;
+    int c = atk.charaIndex;
+    float d = (float)atk.dir;
+    bool customSuper = (c == 1 || c == 4 || c == 6 || c == 7);
+
+    if (atk.state == ACT_SUPER_AIR) {
+        b.w = 85; b.h = 75; b.offX = d * 45; b.offY = 20;
+        b.damage = 240; b.kx = d * 8.0f; b.ky = 18.0f; b.smash = true; b.stun = 55;
+    }
+    else if (atk.state == ACT_SUPER_ENHANCED) {
+        if (atk.fromAirLightCombo) {
+            b.w = 100; b.h = 110; b.offX = d * 45; b.offY = -25;
+            b.damage = 450; b.kx = d * 5.0f; b.ky = -24.0f; b.launcher = true; b.stun = 80;
+        }
+        else {
+            b.w = 95; b.h = 90; b.offX = d * 45; b.offY = -35;
+            b.damage = 330; b.kx = d * 3.5f; b.ky = -22.0f; b.launcher = true; b.stun = 70;
+        }
+    }
+    else if (atk.state == ACT_SUPER_ATTACK && !customSuper) {
+        b.w = 80; b.h = 50; b.offX = d * 45; b.offY = -15;
+        b.damage = 190; b.kx = d * 7.0f; b.ky = -15.0f; b.launcher = true; b.stun = 60;
+    }
+    else if (atk.state == ACT_BOAR_CHARGE) {
+        int face = atk.boarSuper ? 6 : ClampI(atk.diceFace, 3, 6);
+        const BoarFace& bf = BOAR_FACES[face];
+        b.w = 64; b.h = 54; b.offX = d * 30; b.offY = -10;
+        b.damage = atk.boarSuper ? 260 : bf.damage;
+        b.kx = d * bf.knockX; b.ky = -9.0f;
+        b.launcher = true; b.stun = 50; b.unblockable = bf.unblockable;
+    }
+    else {
+        switch (c) {
+        case 0:
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 48; b.h = 28; b.offX = d * 35; b.offY = -12; b.damage = 45; b.kx = d * 2.4f; b.stun = 18;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 55; b.h = 32; b.offX = d * 40; b.offY = -10; b.damage = 55; b.kx = d * 3.2f; b.stun = 22;
+            }
+            else if (atk.state == ACT_SKILL_ATTACK) {
+                b.w = 60; b.h = 80; b.offX = d * 36; b.offY = -40; b.damage = 125; b.kx = d * 1.5f; b.ky = -17.5f; b.launcher = true; b.stun = 48;
+            }
+            else if (atk.state == ACT_AIR_KICK) {
+                b.w = 58; b.h = 50; b.offX = d * 32; b.offY = 22; b.damage = 135; b.kx = d * 4.0f; b.ky = 16.5f; b.smash = true; b.stun = 42;
+            }
+            else if (atk.state == ACT_AIR_LIGHT) {
+                b.w = 52; b.h = 38; b.offX = d * 28; b.offY = 0; b.damage = 55; b.kx = d * 1.8f; b.ky = -2.0f; b.stun = 28;
+            }
+            break;
+
+        case 1: // 罠太郎：近接は激弱
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 30; b.h = 22; b.offX = d * 24; b.offY = -12; b.damage = 22; b.kx = d * 1.5f; b.stun = 14;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 32; b.h = 24; b.offX = d * 26; b.offY = -12; b.damage = 28; b.kx = d * 2.0f; b.stun = 16;
+            }
+            else if (atk.state == ACT_AIR_LIGHT) {
+                b.w = 36; b.h = 30; b.offX = d * 22; b.offY = 0; b.damage = 25; b.kx = d * 1.5f; b.ky = -1.0f; b.stun = 16;
+            }
+            break;
+
+        case 2:
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 120; b.h = 28; b.offX = d * 80; b.offY = -12; b.damage = 50; b.kx = d * 3.5f; b.stun = 20;
+                if (distToDef > 100.0f) b.damage = (int)(b.damage * 1.5f);
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 120; b.h = 30; b.offX = d * 80; b.offY = -14; b.damage = 55; b.kx = d * 3.8f; b.stun = 22;
+                if (distToDef > 100.0f) b.damage = (int)(b.damage * 1.5f);
+            }
+            else if (atk.state == ACT_MID_ATTACK) {
+                b.w = 160; b.h = 32; b.offX = d * 105; b.offY = -8; b.damage = 70; b.kx = d * 5.0f; b.stun = 25;
+                if (distToDef > 120.0f) b.damage = (int)(b.damage * 1.5f);
+            }
+            else if (atk.state == ACT_SKILL_ATTACK) {
+                b.w = 75; b.h = 75; b.offX = d * 45; b.offY = -28; b.damage = 140; b.kx = d * 2.2f; b.ky = -16.5f; b.launcher = true; b.stun = 48;
+            }
+            else if (atk.state == ACT_AIR_KICK || atk.state == ACT_AIR_LIGHT) {
+                b.w = 85; b.h = 80; b.offX = d * 45; b.offY = 25; b.damage = 135; b.kx = d * 4.0f; b.ky = 16.0f; b.smash = true; b.stun = 42;
+            }
+            break;
+
+        case 4: // メガトン大前：物干し竿
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 60; b.h = 40; b.offX = d * 45; b.offY = -12; b.damage = 50; b.kx = d * 3.0f; b.stun = 20;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 64; b.h = 40; b.offX = d * 48; b.offY = -12; b.damage = 60; b.kx = d * 3.5f; b.stun = 22;
+            }
+            else if (atk.state == ACT_MID_ATTACK) {
+                b.w = 300; b.h = 55; b.offX = d * 165; b.offY = -15; b.damage = 165; b.kx = d * 10.0f; b.ky = -5.0f; b.smash = true; b.stun = 42;
+            }
+            else if (atk.state == ACT_SKILL_ATTACK) {
+                b.w = 170; b.h = 130; b.offX = d * 115; b.offY = -25; b.damage = 190; b.kx = d * 4.0f; b.ky = -17.0f; b.launcher = true; b.stun = 50;
+            }
+            else if (atk.state == ACT_SUPER_ATTACK) {
+                b.w = 1280; b.h = 90; b.offX = 0; b.offY = -15; b.damage = 270; b.kx = d * 12.0f; b.ky = -10.0f; b.launcher = true; b.stun = 60;
+            }
+            break;
+
+        case 5:
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 62; b.h = 35; b.offX = d * 44; b.offY = -12; b.damage = 55; b.kx = d * 3.5f; b.stun = 22;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 62; b.h = 35; b.offX = d * 46; b.offY = -12; b.damage = 60; b.kx = d * 3.8f; b.stun = 22;
+            }
+            else if (atk.state == ACT_SKILL_ATTACK) {
+                b.w = 68; b.h = 65; b.offX = d * 44; b.offY = -32; b.damage = 120; b.kx = d * 2.0f; b.ky = -16.5f; b.launcher = true; b.stun = 46;
+            }
+            break;
+
+        case 6:
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 70; b.h = 45; b.offX = d * 45; b.offY = -12; b.damage = 65; b.kx = d * 3.5f; b.stun = 25;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 72; b.h = 45; b.offX = d * 48; b.offY = -12; b.damage = 70; b.kx = d * 4.0f; b.stun = 26;
+            }
+            else if (atk.state == ACT_MID_ATTACK) {
+                b.w = 60; b.h = 45; b.offX = d * 35; b.offY = -12; b.damage = 80; b.kx = d * 4.0f; b.stun = 22;
+            }
+            else if (atk.state == ACT_SKILL_ATTACK) {
+                b.w = 80; b.h = 80; b.offX = d * 45; b.offY = -35; b.damage = 150; b.kx = d * 2.0f; b.ky = -18.0f; b.launcher = true; b.stun = 55;
+            }
+            else if (atk.state == ACT_SUPER_ATTACK) {
+                b.w = 80; b.h = 60; b.offX = d * 40; b.offY = -15; b.damage = 70; b.kx = d * 3.0f; b.ky = -2.0f; b.stun = 30;
+            }
+            break;
+
+        case 7: // 吉田：蹴り技はどれもリーチと火力が高い
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 70; b.h = 28; b.offX = d * 50; b.offY = 0; b.damage = 55; b.kx = d * 2.6f; b.stun = 20;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 80; b.h = 36; b.offX = d * 55; b.offY = -20; b.damage = 70; b.kx = d * 4.0f; b.stun = 24;
+            }
+            else if (atk.state == ACT_MID_ATTACK) {
+                b.w = 90; b.h = 40; b.offX = d * 60; b.offY = -12; b.damage = 100; b.kx = d * 9.0f; b.ky = -4.0f; b.smash = true; b.stun = 36;
+            }
+            else if (atk.state == ACT_SKILL_ATTACK) {
+                b.w = 60; b.h = 90; b.offX = d * 30; b.offY = -40; b.damage = 130; b.kx = d * 2.0f; b.ky = -18.0f; b.launcher = true; b.stun = 48;
+            }
+            else if (atk.state == ACT_AIR_LIGHT) {
+                b.w = 60; b.h = 50; b.offX = d * 32; b.offY = 20; b.damage = 95; b.kx = d * 3.0f; b.ky = 15.0f; b.smash = true; b.stun = 36;
+            }
+            else if (atk.state == ACT_AIR_KICK) {
+                b.w = 90; b.h = 50; b.offX = d * 30; b.offY = 10; b.damage = 120; b.kx = d * 7.5f; b.ky = -6.0f; b.smash = true; b.stun = 40;
+            }
+            else if (atk.state == ACT_SUPER_ATTACK) {
+                b.w = 80; b.h = 60; b.offX = d * 45; b.offY = -10; b.damage = 42; b.kx = d * 2.5f; b.ky = -1.0f; b.stun = 30;
+            }
+            break;
+
+        case 8: // 無防備たけし：自分の攻撃は雀の涙
+            if (atk.state == ACT_LIGHT1) {
+                b.w = 24; b.h = 22; b.offX = d * 20; b.offY = -12; b.damage = 26; b.kx = d * 1.2f; b.stun = 14;
+            }
+            else if (atk.state == ACT_LIGHT2) {
+                b.w = 26; b.h = 24; b.offX = d * 22; b.offY = -12; b.damage = 30; b.kx = d * 1.6f; b.stun = 16;
+            }
+            else if (atk.state == ACT_AIR_LIGHT) {
+                b.w = 28; b.h = 26; b.offX = d * 20; b.offY = 0; b.damage = 28; b.kx = d * 1.2f; b.stun = 16;
+            }
+            break;
+        }
+    }
+    return b.damage > 0;
+}
+
+// やられ判定（論理座標の中心と幅・高さ）
+static void GetHurtBox(const Fighter& f, float& cx, float& cy, float& w, float& h) {
+    w = (f.charaIndex == 4) ? 48.0f : 30.0f;
+    h = (f.charaIndex == 4) ? 60.0f : 50.0f;
+    cx = f.x;
+    cy = f.y;
+    if (f.state == ACT_SLIP) {
+        w = 46.0f; h = 26.0f; cy = f.y + 12.0f;
+    }
+    else if (f.crouching && (f.state == ACT_IDLE || f.state == ACT_GUARD)) {
+        cy = f.y + h * 0.2f;
+        h = h * 0.6f;
+    }
+    if (f.charaIndex == 2) {
+        if (f.state == ACT_LIGHT1 || f.state == ACT_LIGHT2) {
+            w = 130.0f;
+            cx = f.x + (float)f.dir * 65.0f;
+        }
+        else if (f.state == ACT_MID_ATTACK) {
+            w = 160.0f;
+            cx = f.x + (float)f.dir * 80.0f;
+        }
+    }
+}
+
+// ----------------------------------------------------
+// ダメージ
+// ----------------------------------------------------
+static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx, float ky, bool isLauncher, bool isSmash, bool unblockable = false, int srcTag = -1) {
     // 周回難易度：CPUの攻撃力アップ
     if (!g_is_net_battle && &atk == &g_other) dmg = dmg * (100 + GetHardLevel() * 18) / 100;
     // 壁バウンド後の追撃は火力を絞る（限定追撃）
     if (def.wallBounceUsed) dmg = dmg * 7 / 10;
+
+    int ai = FighterIndex(atk);
+    int di = FighterIndex(def);
 
     if (def.state == ACT_GUARD) {
         if (!unblockable) {
@@ -948,7 +1750,12 @@ static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx,
             def.hp -= chipDmg;
             def.hitStop = 4;
             def.vx = kx * 0.4f;
-            SpawnHitFX(def.x, def.y - 15, BLUE, 6);
+            int gs = stun / 2 + 2;
+            if (def.guardStun < gs) def.guardStun = gs;
+            g_stats[di].guards++;
+            SpawnHitFX(def.x + (float)def.dir * 16.0f, def.y - 15, BLUE, 6);
+            SpawnSparks(def.x + (float)def.dir * 16.0f, def.y - 15, CYAN, 3, 18.0f);
+            if (srcTag < 0) RecordAdvantage(atk, def, def.guardStun, true, false);
             return;
         }
         SpawnPopup(def.x, def.y - 85, "ガード不能!!", RED);
@@ -969,11 +1776,24 @@ static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx,
     def.vx = kx;
     def.vy = ky;
     def.stanceLevel = 0;
+    def.guardStun = 0;
     def.comboTaken++;
     def.wallBounceReady = !def.wallBounceUsed && fabsf(kx) >= 6.5f;
 
     atk.comboCount++;
     atk.comboDisplayTimer = 60;
+
+    g_stats[ai].hits++;
+    g_stats[ai].damage += dmg;
+    if (atk.comboCount > g_stats[ai].maxCombo) g_stats[ai].maxCombo = atk.comboCount;
+    g_stats[di].taken++;
+
+    if (g_mode == MODE_TRAINING && &atk == &g_me) {
+        g_comboDmg += dmg;
+        g_comboHits++;
+        LogComboTag(srcTag >= 0 ? srcTag : (int)atk.state);
+        if (srcTag < 0 && atk.state == ACT_BOAR_CHARGE && (atk.diceFace == 6 || atk.boarSuper)) LogComboTag(TAG_DICE6);
+    }
 
     int spMul = (atk.charaIndex == 0) ? 6 : 4;
     int spBonus = 5 + (atk.comboCount * spMul);
@@ -999,12 +1819,17 @@ static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx,
     else {
         def.state = def.isGrounded ? ACT_HIT : ACT_AIR_HIT;
     }
+
+    if (srcTag < 0) RecordAdvantage(atk, def, stun, false, isLauncher || isSmash);
 }
 
 // たけしの当身成功：受けた技が大きいほど返しも大きい
 static void TriggerCounter(Fighter& def, Fighter& atk, int incoming) {
     bool sup = (def.stanceLevel >= 2);
     int dmg = (sup ? 300 : 190) + (int)((float)incoming * (sup ? 1.5f : 1.0f));
+
+    if (&def == &g_me) LogComboTag(sup ? TAG_COUNTER_SUPER : TAG_COUNTER);
+    g_stats[FighterIndex(def)].parries++;
 
     atk.armorFrames = 0;
     atk.invulFrames = 0;
@@ -1034,13 +1859,41 @@ static void TriggerCounter(Fighter& def, Fighter& atk, int incoming) {
     SpawnPopup(def.x, def.y - 95, "COUNTER!!", CYAN);
 }
 
+static void DamageGimmick(Fighter& atk, int damage, float ax, float ay) {
+    if (!g_gimmickEnabled || g_gimmick.fallen || g_gimmick.isFalling) return;
+    if (fabsf(ax - g_gimmick.x) >= 50.0f || ay <= GROUND_Y - 140.0f) return;
+
+    g_gimmick.hp -= damage;
+    SpawnHitFX(g_gimmick.x, GROUND_Y - 60, YELLOW, 8);
+    if (g_gimmick.hp > 0) return;
+
+    g_gimmick.isFalling = true;
+    g_gimmick.fallAngle = 0.0f;
+    g_gimmick.activeHitBox = atk.dir;
+    TriggerScreenShake(12);
+    SpawnHitFX(g_gimmick.x, GROUND_Y - 40, ORANGE, 30);
+    SpawnSparks(g_gimmick.x, GROUND_Y - 40, YELLOW, 10, 45.0f);
+
+    if (g_currentStageIdx == 1) {
+        SpawnPopup(g_gimmick.x, GROUND_Y - 160, "感電コンテナ破壊!! 電流停止", CYAN);
+    }
+    if (g_currentStageIdx == 2) {
+        g_gimmick.itemActive = true;
+        g_gimmick.itemX = g_gimmick.x;
+        g_gimmick.itemY = GROUND_Y;
+    }
+}
+
 static void CheckAttackHit(Fighter& atk, Fighter& def) {
     if (atk.hasHit) return;
 
     FrameData fd = GetFrameData(atk.charaIndex, atk.state);
+    if (atk.animTimer < fd.startup || atk.animTimer >= (fd.startup + fd.active)) return;
 
-    if (atk.animTimer < fd.startup || atk.animTimer >= (fd.startup + fd.active)) {
-        return;
+    if (atk.state == ACT_SUPER_ENHANCED && atk.fromAirLightCombo && atk.animTimer == fd.startup) {
+        TriggerScreenShake(20);
+        SpawnSparks(atk.x, atk.y - 20, YELLOW, 25, 75.0f);
+        SpawnSparks(atk.x, atk.y - 20, RED, 25, 75.0f);
     }
     if (def.invulFrames > 0) return;
 
@@ -1053,274 +1906,35 @@ static void CheckAttackHit(Fighter& atk, Fighter& def) {
             def.vx = (float)atk.dir * 8.5f;
             def.vy = -12.0f;
             def.stanceLevel = 0;
+            def.guardStun = 0;
+            int ai = FighterIndex(atk);
+            g_stats[ai].hits++;
+            g_stats[ai].damage += 95;
+            g_stats[FighterIndex(def)].taken++;
+            if (g_mode == MODE_TRAINING && &atk == &g_me) {
+                g_comboDmg += 95;
+                g_comboHits++;
+                LogComboTag(ACT_THROW);
+            }
             TriggerScreenShake(8);
             SpawnHitFX(def.x, def.y - 20, YELLOW, 20);
-            return;
         }
         return;
     }
 
-    float hitBoxW = 0, hitBoxH = 0, offX = 0, offY = 0;
-    int damage = 0;
-    int hitStun = 20;
-    float knockBackX = 0, knockBackY = 0;
-    bool isLauncher = false;
-    bool isAirSmash = false;
-    bool unblockable = false;
-    int c = atk.charaIndex;
-    bool customSuper = (c == 1 || c == 4 || c == 6 || c == 7);
+    AttackBox b;
+    if (!GetAttackBox(atk, fabsf(atk.x - def.x), b)) return;
+    int damage = b.damage;
+    int hitStun = b.stun;
 
-    if (atk.state == ACT_SUPER_AIR) {
-        hitBoxW = 85; hitBoxH = 75; offX = (float)atk.dir * 45; offY = 20;
-        damage = 240;
-        knockBackX = (float)atk.dir * 8.0f; knockBackY = 18.0f;
-        isAirSmash = true; hitStun = 55;
-    }
-    else if (atk.state == ACT_SUPER_ENHANCED) {
-        if (atk.fromAirLightCombo) {
-            hitBoxW = 100; hitBoxH = 110; offX = (float)atk.dir * 45; offY = -25;
-            damage = 450;
-            knockBackX = (float)atk.dir * 5.0f; knockBackY = -24.0f;
-            isLauncher = true; hitStun = 80;
-            TriggerScreenShake(20);
-            SpawnSparks(atk.x, atk.y - 20, YELLOW, 25, 75.0f);
-            SpawnSparks(atk.x, atk.y - 20, RED, 25, 75.0f);
-        }
-        else {
-            hitBoxW = 95; hitBoxH = 90; offX = (float)atk.dir * 45; offY = -35;
-            damage = 330; knockBackX = (float)atk.dir * 3.5f; knockBackY = -22.0f;
-            isLauncher = true; hitStun = 70;
-        }
-    }
-    else if (atk.state == ACT_SUPER_ATTACK && !customSuper) {
-        hitBoxW = 80; hitBoxH = 50; offX = (float)atk.dir * 45; offY = -15;
-        damage = 190; knockBackX = (float)atk.dir * 7.0f; knockBackY = -15.0f;
-        isLauncher = true; hitStun = 60;
-    }
-    else if (atk.state == ACT_BOAR_CHARGE) {
-        hitBoxW = 64; hitBoxH = 54; offX = (float)atk.dir * 30; offY = -10;
-        damage = atk.boarSuper ? 260 : 160;
-        knockBackX = (float)atk.dir * 11.0f; knockBackY = -9.0f;
-        isLauncher = true; hitStun = 50; unblockable = true;
-    }
-    else {
-        switch (c) {
-        case 0:
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 48; hitBoxH = 28; offX = (float)atk.dir * 35; offY = -12;
-                damage = 45; knockBackX = (float)atk.dir * 2.4f; hitStun = 18;
-            }
-            else if (atk.state == ACT_LIGHT2) {
-                hitBoxW = 55; hitBoxH = 32; offX = (float)atk.dir * 40; offY = -10;
-                damage = 55; knockBackX = (float)atk.dir * 3.2f; hitStun = 22;
-            }
-            else if (atk.state == ACT_SKILL_ATTACK) {
-                hitBoxW = 60; hitBoxH = 80; offX = (float)atk.dir * 36; offY = -40;
-                damage = 125; knockBackX = (float)atk.dir * 1.5f; knockBackY = -17.5f;
-                isLauncher = true; hitStun = 48;
-            }
-            else if (atk.state == ACT_AIR_KICK) {
-                hitBoxW = 58; hitBoxH = 50; offX = (float)atk.dir * 32; offY = 22;
-                damage = 135; knockBackX = (float)atk.dir * 4.0f; knockBackY = 16.5f;
-                isAirSmash = true; hitStun = 42;
-            }
-            else if (atk.state == ACT_AIR_LIGHT) {
-                hitBoxW = 52; hitBoxH = 38; offX = (float)atk.dir * 28; offY = 0;
-                damage = 55; knockBackX = (float)atk.dir * 1.8f; knockBackY = -2.0f; hitStun = 28;
-            }
-            break;
+    float ax = atk.x + b.offX;
+    float ay = atk.y + b.offY;
+    DamageGimmick(atk, damage, ax, ay);
 
-        case 1: // 罠太郎：近接は激弱
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 30; hitBoxH = 22; offX = (float)atk.dir * 24; offY = -12;
-                damage = 22; knockBackX = (float)atk.dir * 1.5f; hitStun = 14;
-            }
-            else if (atk.state == ACT_LIGHT2) {
-                hitBoxW = 32; hitBoxH = 24; offX = (float)atk.dir * 26; offY = -12;
-                damage = 28; knockBackX = (float)atk.dir * 2.0f; hitStun = 16;
-            }
-            else if (atk.state == ACT_AIR_LIGHT) {
-                hitBoxW = 36; hitBoxH = 30; offX = (float)atk.dir * 22; offY = 0;
-                damage = 25; knockBackX = (float)atk.dir * 1.5f; knockBackY = -1.0f; hitStun = 16;
-            }
-            break;
+    float hcx, hcy, hw, hh;
+    GetHurtBox(def, hcx, hcy, hw, hh);
 
-        case 2:
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 120; hitBoxH = 28; offX = (float)atk.dir * 80; offY = -12;
-                damage = 50; knockBackX = (float)atk.dir * 3.5f; hitStun = 20;
-                if (fabsf(atk.x - def.x) > 100.0f) damage = (int)(damage * 1.5f);
-            }
-            else if (atk.state == ACT_MID_ATTACK) {
-                hitBoxW = 160; hitBoxH = 32; offX = (float)atk.dir * 105; offY = -8;
-                damage = 70; knockBackX = (float)atk.dir * 5.0f; hitStun = 25;
-                if (fabsf(atk.x - def.x) > 120.0f) damage = (int)(damage * 1.5f);
-            }
-            else if (atk.state == ACT_SKILL_ATTACK) {
-                hitBoxW = 75; hitBoxH = 75; offX = (float)atk.dir * 45; offY = -28;
-                damage = 140; knockBackX = (float)atk.dir * 2.2f; knockBackY = -16.5f;
-                isLauncher = true; hitStun = 48;
-            }
-            else if (atk.state == ACT_AIR_KICK || atk.state == ACT_AIR_LIGHT) {
-                hitBoxW = 85; hitBoxH = 80; offX = (float)atk.dir * 45; offY = 25;
-                damage = 135; knockBackX = (float)atk.dir * 4.0f; knockBackY = 16.0f;
-                isAirSmash = true; hitStun = 42;
-            }
-            break;
-
-        case 4: // メガトン大前：物干し竿
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 60; hitBoxH = 40; offX = (float)atk.dir * 45; offY = -12;
-                damage = 50; knockBackX = (float)atk.dir * 3.0f; hitStun = 20;
-            }
-            else if (atk.state == ACT_LIGHT2) {
-                hitBoxW = 64; hitBoxH = 40; offX = (float)atk.dir * 48; offY = -12;
-                damage = 60; knockBackX = (float)atk.dir * 3.5f; hitStun = 22;
-            }
-            else if (atk.state == ACT_MID_ATTACK) {
-                hitBoxW = 300; hitBoxH = 55; offX = (float)atk.dir * 165; offY = -15;
-                damage = 165; knockBackX = (float)atk.dir * 10.0f; knockBackY = -5.0f;
-                isAirSmash = true; hitStun = 42;
-            }
-            else if (atk.state == ACT_SKILL_ATTACK) {
-                hitBoxW = 170; hitBoxH = 130; offX = (float)atk.dir * 115; offY = -25;
-                damage = 190; knockBackX = (float)atk.dir * 4.0f; knockBackY = -17.0f;
-                isLauncher = true; hitStun = 50;
-            }
-            else if (atk.state == ACT_SUPER_ATTACK) {
-                hitBoxW = 1280; hitBoxH = 90; offX = 0; offY = -15;
-                damage = 270; knockBackX = (float)atk.dir * 12.0f; knockBackY = -10.0f;
-                isLauncher = true; hitStun = 60;
-            }
-            break;
-
-        case 5:
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 62; hitBoxH = 35; offX = (float)atk.dir * 44; offY = -12;
-                damage = 55; knockBackX = (float)atk.dir * 3.5f; hitStun = 22;
-            }
-            else if (atk.state == ACT_SKILL_ATTACK) {
-                hitBoxW = 68; hitBoxH = 65; offX = (float)atk.dir * 44; offY = -32;
-                damage = 120; knockBackX = (float)atk.dir * 2.0f; knockBackY = -16.5f;
-                isLauncher = true; hitStun = 46;
-            }
-            break;
-
-        case 6:
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 70; hitBoxH = 45; offX = (float)atk.dir * 45; offY = -12;
-                damage = 65; knockBackX = (float)atk.dir * 3.5f; hitStun = 25;
-            }
-            else if (atk.state == ACT_MID_ATTACK) {
-                hitBoxW = 60; hitBoxH = 45; offX = (float)atk.dir * 35; offY = -12;
-                damage = 80; knockBackX = (float)atk.dir * 4.0f; hitStun = 22;
-            }
-            else if (atk.state == ACT_SKILL_ATTACK) {
-                hitBoxW = 80; hitBoxH = 80; offX = (float)atk.dir * 45; offY = -35;
-                damage = 150; knockBackX = (float)atk.dir * 2.0f; knockBackY = -18.0f;
-                isLauncher = true; hitStun = 55;
-            }
-            else if (atk.state == ACT_SUPER_ATTACK) {
-                hitBoxW = 80; hitBoxH = 60; offX = (float)atk.dir * 40; offY = -15;
-                damage = 70; knockBackX = (float)atk.dir * 3.0f; knockBackY = -2.0f; hitStun = 30;
-            }
-            break;
-
-        case 7: // 吉田：蹴り技はどれもリーチと火力が高い
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 70; hitBoxH = 28; offX = (float)atk.dir * 50; offY = 0;
-                damage = 55; knockBackX = (float)atk.dir * 2.6f; hitStun = 20;
-            }
-            else if (atk.state == ACT_LIGHT2) {
-                hitBoxW = 80; hitBoxH = 36; offX = (float)atk.dir * 55; offY = -20;
-                damage = 70; knockBackX = (float)atk.dir * 4.0f; hitStun = 24;
-            }
-            else if (atk.state == ACT_MID_ATTACK) {
-                hitBoxW = 90; hitBoxH = 40; offX = (float)atk.dir * 60; offY = -12;
-                damage = 100; knockBackX = (float)atk.dir * 9.0f; knockBackY = -4.0f;
-                isAirSmash = true; hitStun = 36;
-            }
-            else if (atk.state == ACT_SKILL_ATTACK) {
-                hitBoxW = 60; hitBoxH = 90; offX = (float)atk.dir * 30; offY = -40;
-                damage = 130; knockBackX = (float)atk.dir * 2.0f; knockBackY = -18.0f;
-                isLauncher = true; hitStun = 48;
-            }
-            else if (atk.state == ACT_AIR_LIGHT) {
-                hitBoxW = 60; hitBoxH = 50; offX = (float)atk.dir * 32; offY = 20;
-                damage = 95; knockBackX = (float)atk.dir * 3.0f; knockBackY = 15.0f;
-                isAirSmash = true; hitStun = 36;
-            }
-            else if (atk.state == ACT_AIR_KICK) {
-                hitBoxW = 90; hitBoxH = 50; offX = (float)atk.dir * 30; offY = 10;
-                damage = 120; knockBackX = (float)atk.dir * 7.5f; knockBackY = -6.0f;
-                isAirSmash = true; hitStun = 40;
-            }
-            else if (atk.state == ACT_SUPER_ATTACK) {
-                hitBoxW = 80; hitBoxH = 60; offX = (float)atk.dir * 45; offY = -10;
-                damage = 42; knockBackX = (float)atk.dir * 2.5f; knockBackY = -1.0f; hitStun = 30;
-            }
-            break;
-
-        case 8: // 無防備たけし：自分の攻撃は雀の涙
-            if (atk.state == ACT_LIGHT1) {
-                hitBoxW = 24; hitBoxH = 22; offX = (float)atk.dir * 20; offY = -12;
-                damage = 26; knockBackX = (float)atk.dir * 1.2f; hitStun = 14;
-            }
-            else if (atk.state == ACT_LIGHT2) {
-                hitBoxW = 26; hitBoxH = 24; offX = (float)atk.dir * 22; offY = -12;
-                damage = 30; knockBackX = (float)atk.dir * 1.6f; hitStun = 16;
-            }
-            else if (atk.state == ACT_AIR_LIGHT) {
-                hitBoxW = 28; hitBoxH = 26; offX = (float)atk.dir * 20; offY = 0;
-                damage = 28; knockBackX = (float)atk.dir * 1.2f; hitStun = 16;
-            }
-            break;
-        }
-    }
-
-    if (damage == 0) return;
-
-    float ax = atk.x + offX;
-    float ay = atk.y + offY;
-
-    if (!g_gimmick.fallen && !g_gimmick.isFalling) {
-        if (fabsf(ax - g_gimmick.x) < 50.0f && ay > GROUND_Y - 140.0f) {
-            g_gimmick.hp -= damage;
-            SpawnHitFX(g_gimmick.x, GROUND_Y - 60, YELLOW, 8);
-            if (g_gimmick.hp <= 0) {
-                g_gimmick.isFalling = true;
-                g_gimmick.fallAngle = 0.0f;
-                g_gimmick.activeHitBox = atk.dir;
-                TriggerScreenShake(12);
-                SpawnHitFX(g_gimmick.x, GROUND_Y - 40, ORANGE, 30);
-                SpawnSparks(g_gimmick.x, GROUND_Y - 40, YELLOW, 10, 45.0f);
-
-                if (g_slots[g_currentSlot].stageProgress == 2) {
-                    g_gimmick.itemActive = true;
-                    g_gimmick.itemX = g_gimmick.x;
-                    g_gimmick.itemY = GROUND_Y;
-                }
-            }
-        }
-    }
-
-    float defHitW = (def.charaIndex == 4) ? 48.0f : 30.0f;
-    float defHitH = (def.charaIndex == 4) ? 60.0f : 50.0f;
-    float defCenterX = def.x;
-    float defCenterY = def.y;
-
-    if (def.charaIndex == 2) {
-        if (def.state == ACT_LIGHT1) {
-            defHitW = 130.0f;
-            defCenterX = def.x + (float)def.dir * 65.0f;
-        }
-        else if (def.state == ACT_MID_ATTACK) {
-            defHitW = 160.0f;
-            defCenterX = def.x + (float)def.dir * 80.0f;
-        }
-    }
-
-    if (fabsf(ax - defCenterX) < (hitBoxW + defHitW) / 2.0f && fabsf(ay - defCenterY) < (hitBoxH + defHitH) / 2.0f) {
+    if (fabsf(ax - hcx) < (b.w + hw) / 2.0f && fabsf(ay - hcy) < (b.h + hh) / 2.0f) {
         atk.hasHit = true;
 
         // 当身（たけし）：構えの最中に殴られたら即反撃
@@ -1338,6 +1952,8 @@ static void CheckAttackHit(Fighter& atk, Fighter& def) {
             atk.vx = (float)-atk.dir * 4.5f;
             def.isCounter = true;
             def.spGauge += master ? 40 : 20; if (def.spGauge > 100) def.spGauge = 100;
+            g_stats[FighterIndex(def)].parries++;
+            if (&def == &g_me) LogComboTag(TAG_PARRY);
             g_parryNoticeTimer = 35;
             TriggerScreenShake(master ? 12 : 6);
             SpawnHitFX(def.x, def.y - 15, CYAN, 25);
@@ -1369,27 +1985,37 @@ static void CheckAttackHit(Fighter& atk, Fighter& def) {
             g_isKokusenKoFinish = true;
         }
 
-        ApplyDamage(def, atk, damage, hitStun, knockBackX, knockBackY, isLauncher, isAirSmash, unblockable);
+        ApplyDamage(def, atk, damage, hitStun, b.kx, b.ky, b.launcher, b.smash, b.unblockable);
         if (atk.state == ACT_BOAR_CHARGE) atk.vx *= 0.3f;
     }
 }
 
 static void UpdateStageGimmick(int stageIdx) {
+    if (!g_gimmickEnabled) {
+        g_gimmick.hazardActive = false;
+        g_gimmick.hazardWarning = false;
+        return;
+    }
     g_gimmick.stageTimer++;
 
-    if (stageIdx == 1) {
-        if (g_gimmick.stageTimer % 240 > 180) {
+    // 感電床：予告3秒 → 通電1秒。ジャンプ・ガード・安全地帯・コンテナ破壊で回避できる
+    g_gimmick.hazardActive = false;
+    g_gimmick.hazardWarning = false;
+    if (stageIdx == 1 && !g_gimmick.fallen && !g_gimmick.isFalling) {
+        int phase = g_gimmick.stageTimer % HAZARD_PERIOD;
+        if (phase >= HAZARD_ACTIVE_START) {
             g_gimmick.hazardActive = true;
             Fighter* fList[2] = { &g_me, &g_other };
             for (int i = 0; i < 2; i++) {
-                if (fList[i]->isGrounded && fList[i]->state != ACT_GUARD) {
-                    fList[i]->hp -= 1;
-                    if (rand() % 12 == 0) SpawnHitFX(fList[i]->x, GROUND_Y, CYAN, 4);
-                }
+                Fighter& f = *fList[i];
+                if (!f.isGrounded || f.state == ACT_GUARD || f.invulFrames > 0 || InHazardSafeZone(f.x)) continue;
+                f.hp -= 1;
+                if (rand() % 12 == 0) SpawnHitFX(f.x, GROUND_Y, CYAN, 4);
             }
         }
-        else {
-            g_gimmick.hazardActive = false;
+        else if (phase >= HAZARD_WARN_START) {
+            g_gimmick.hazardWarning = true;
+            g_gimmick.hazardCountdown = (HAZARD_ACTIVE_START - phase + 59) / 60;
         }
     }
 
@@ -1439,7 +2065,7 @@ static void UpdateStageGimmick(int stageIdx) {
 }
 
 // ----------------------------------------------------
-// 共通の物理・状態更新（プレイヤー / CPU 共通）
+// 共通の物理・状態更新
 // ----------------------------------------------------
 
 // 壁バウンド：強い吹っ飛びで画面端に激突すると跳ね返り、1回だけ追撃できる
@@ -1458,6 +2084,7 @@ static void HitWall(Fighter& f, int pushDir) {
         SpawnHitFX(f.x - (float)pushDir * 10.0f, f.y - 25, WHITE, 25);
         SpawnSparks(f.x - (float)pushDir * 10.0f, f.y - 25, ORANGE, 14, 55.0f);
         SpawnPopup(f.x + (float)pushDir * 60.0f, f.y - 100, "WALL BOUNCE!! 追撃チャンス", ORANGE);
+        if (&f == &g_other) LogComboTag(TAG_WALL);
     }
     else if (f.state == ACT_AIR_HIT) {
         f.vx = (float)pushDir * 4.0f;
@@ -1472,6 +2099,7 @@ static bool UpdateFighterCommon(Fighter& f, Fighter& opp, bool isPlayer) {
     if (f.invulFrames > 0) f.invulFrames--;
     if (f.burstCooldown > 0) f.burstCooldown--;
     if (f.diceShowTimer > 0) f.diceShowTimer--;
+    if (f.guardStun > 0) f.guardStun--;
 
     if (f.state == ACT_IDLE || f.state == ACT_GUARD || f.state == ACT_DASH) {
         f.stamina += 0.75f;
@@ -1501,11 +2129,8 @@ static bool UpdateFighterCommon(Fighter& f, Fighter& opp, bool isPlayer) {
         }
     }
 
-    if (isPlayer) {
-        int curStage = g_is_net_battle ? g_selectedNetStage : g_slots[g_currentSlot].stageProgress;
-        if (curStage == 3 && !f.isGrounded) {
-            f.vx -= 0.15f;
-        }
+    if (isPlayer && g_currentStageIdx == 3 && !f.isGrounded) {
+        f.vx -= 0.15f;
     }
 
     f.vy += GRAVITY;
@@ -1607,7 +2232,7 @@ static bool TryBurst(Fighter& f, Fighter& opp) {
 }
 
 // 通常技・必殺技の発動（btn 0:J 1:K 2:L）。プレイヤー・CPU共通
-static bool StartAttack(Fighter& f, Fighter& opp, int btn) {
+static bool StartAttackInner(Fighter& f, Fighter& opp, int btn) {
     int c = f.charaIndex;
 
     // いのししマン：どのボタンでも突進（サイコロ判定）
@@ -1618,6 +2243,7 @@ static bool StartAttack(Fighter& f, Fighter& opp, int btn) {
         f.animTimer = 0;
         f.hasHit = false;
         f.boarSuper = false;
+        f.boarTiming = 0;
         f.vx = 0;
         return true;
     }
@@ -1744,8 +2370,14 @@ static bool StartAttack(Fighter& f, Fighter& opp, int btn) {
     return true;
 }
 
+static bool StartAttack(Fighter& f, Fighter& opp, int btn) {
+    if (!StartAttackInner(f, opp, btn)) return false;
+    RecordMoveStart(f);
+    return true;
+}
+
 // 地上超必殺技（J+K）
-static bool StartSuper(Fighter& f, Fighter& opp) {
+static void StartSuper(Fighter& f, Fighter& opp) {
     f.spGauge = 0;
     f.hasHit = false;
     f.animTimer = 0;
@@ -1796,8 +2428,9 @@ static bool StartSuper(Fighter& f, Fighter& opp) {
         f.state = ACT_BOAR_ROLL;
         f.stateTimer = 999;
         f.boarSuper = true;
+        f.boarTiming = 0;
         f.vx = 0;
-        g_superCutinName = "=== 確変!! 猪突猛進・大当たり確定 ! ===";
+        g_superCutinName = "=== 確変!! 猪突猛進・出目6確定 ! ===";
         break;
     case 4:
         f.state = ACT_SUPER_ATTACK;
@@ -1834,7 +2467,7 @@ static bool StartSuper(Fighter& f, Fighter& opp) {
         g_superCutinName = "=== SUPER ATTACK ! ===";
         break;
     }
-    return true;
+    RecordMoveStart(f);
 }
 
 // 状態ごとの毎フレーム処理（空振り・サイコロ・ダッシュ等）
@@ -1847,7 +2480,10 @@ static void UpdateStateSpecials(Fighter& f, Fighter& opp) {
         if (f.animTimer >= fd.startup + fd.active) {
             f.whiffChecked = true;
             if (!f.hasHit) {
-                f.stateTimer += (f.state == ACT_SUPER_ATTACK) ? 40 : 55;
+                int penalty = (f.state == ACT_SUPER_ATTACK) ? 40 : 55;
+                f.stateTimer += penalty;
+                MoveInfo& m = g_moveInfo[FighterIndex(f)];
+                if (m.valid && m.state == f.state) { m.recovery += penalty; m.total += penalty; }
                 SpawnPopup(f.x, f.y - 95, "スカッ…（大スキ!!）", GRAY);
             }
         }
@@ -1861,34 +2497,49 @@ static void UpdateStateSpecials(Fighter& f, Fighter& opp) {
     case ACT_BOAR_ROLL: {
         f.vx = 0;
         if (f.animTimer % 3 == 0) f.diceFace = 1 + rand() % 6;
-        int rollLen = f.boarSuper ? 16 : 30;
+        // CPU（とダミー）は確率で目押し成功
+        if (&f == &g_other && !g_is_net_battle && f.boarTiming == 0 && f.animTimer == BOAR_TIMING_START) {
+            f.boarTiming = (rand() % 100 < 40) ? 1 : 2;
+        }
+        int rollLen = f.boarSuper ? 16 : BOAR_ROLL_FRAMES;
         if (f.animTimer >= rollLen) {
-            bool success = f.boarSuper || (rand() % 2 == 0);
+            int face;
+            if (f.boarSuper) face = 6;
+            else {
+                face = 1 + rand() % 6;
+                if (f.boarTiming == 1) {
+                    int second = 1 + rand() % 6;   // 目押し成功：2回振って良い方
+                    if (second > face) face = second;
+                }
+            }
+            f.diceFace = face;
             f.diceShowTimer = 45;
             f.animTimer = 0;
             f.hasHit = false;
-            if (success) {
-                f.diceFace = 6;
+            const BoarFace& bf = BOAR_FACES[face];
+            if (face >= 3) {
                 f.state = ACT_BOAR_CHARGE;
-                f.stateTimer = f.boarSuper ? 40 : 30;
-                f.vx = (float)f.dir * (f.boarSuper ? 19.0f : 17.0f);
-                TriggerScreenShake(8);
-                SpawnPopup(f.x, f.y - 95, "大当たり!! ガード不能突進!!", YELLOW);
+                f.stateTimer = f.boarSuper ? 40 : bf.duration;
+                f.vx = (float)f.dir * bf.speed;
+                if (face >= 5) TriggerScreenShake(8);
+                RecordMoveInfo(f);
             }
             else {
-                f.diceFace = 1;
+                // 失敗しても小転倒で済む
                 f.state = ACT_SLIP;
-                f.stateTimer = 75;
-                f.vx = (float)f.dir * 5.0f;
-                SpawnPopup(f.x, f.y - 95, "ズコーッ!! 大転倒…", GRAY);
+                f.stateTimer = (face == 1) ? 40 : 24;
+                f.vx = (float)f.dir * ((face == 1) ? 3.0f : 1.5f);
             }
+            SpawnPopup(f.x, f.y - 95, bf.label, (face >= 5) ? YELLOW : ((face >= 3) ? WHITE : GRAY));
         }
         break;
     }
-    case ACT_BOAR_CHARGE:
-        if (!f.hasHit) f.vx = (float)f.dir * (f.boarSuper ? 19.0f : 17.0f);
+    case ACT_BOAR_CHARGE: {
+        int face = f.boarSuper ? 6 : ClampI(f.diceFace, 3, 6);
+        if (!f.hasHit) f.vx = (float)f.dir * BOAR_FACES[face].speed;
         if (f.animTimer % 3 == 0) SpawnHitFX(f.x - (float)f.dir * 20.0f, f.y + 15, GRAY, 2);
         break;
+    }
     case ACT_DASH:
         if (f.animTimer < 10) {
             float spd = CHARA_PROFILES[c].dashSpeed * ((f.moveDir == f.dir) ? 1.0f : 0.85f);
@@ -1903,9 +2554,9 @@ static void UpdateStateSpecials(Fighter& f, Fighter& opp) {
         if (f.animTimer == 40) {
             f.spGauge += 25; if (f.spGauge > 100) f.spGauge = 100;
             SpawnPopup(f.x, f.y - 75, "SP UP!", YELLOW);
-            if (&f == &g_me) {
+            if (&f == &g_me && !g_is_net_battle && g_mode != MODE_TRAINING) {
                 AddCpuTilt(2);
-                if (!g_is_net_battle) SpawnPopup(opp.x, opp.y - 110, "ｲﾗｲﾗ…!!", RED);
+                SpawnPopup(opp.x, opp.y - 110, "ｲﾗｲﾗ…!!", RED);
             }
         }
         break;
@@ -1915,212 +2566,198 @@ static void UpdateStateSpecials(Fighter& f, Fighter& opp) {
 }
 
 // ----------------------------------------------------
-// プレイヤー入力
+// 操作されるファイター（ストーリー・トレーニング・通信のホスト側で共通）
 // ----------------------------------------------------
-struct KeyTrack {
-    bool held;
-    bool pressed;
-    bool doubleTap;
-    int lastTap;
-};
-static const int DOUBLE_TAP_FRAMES = 14;
-static KeyTrack g_kA = { false, false, false, -1000 };
-static KeyTrack g_kD = { false, false, false, -1000 };
-static KeyTrack g_kW = { false, false, false, -1000 };
-static KeyTrack g_kS = { false, false, false, -1000 };
-static KeyTrack g_kSpace = { false, false, false, -1000 };
-static KeyTrack g_kDodge = { false, false, false, -1000 };
-
-static void TrackKey(KeyTrack& k, bool now) {
-    k.pressed = now && !k.held;
-    k.doubleTap = false;
-    if (k.pressed) {
-        if (g_frameCount - k.lastTap <= DOUBLE_TAP_FRAMES) {
-            k.doubleTap = true;
-            k.lastTap = -1000;
-        }
-        else {
-            k.lastTap = g_frameCount;
-        }
-    }
-    k.held = now;
-}
-
-static void UpdatePlayer() {
-    TrackKey(g_kA, CheckHitKey(KEY_INPUT_A) != 0);
-    TrackKey(g_kD, CheckHitKey(KEY_INPUT_D) != 0);
-    TrackKey(g_kW, CheckHitKey(KEY_INPUT_W) != 0);
-    TrackKey(g_kS, CheckHitKey(KEY_INPUT_S) != 0);
-    TrackKey(g_kSpace, CheckHitKey(KEY_INPUT_SPACE) != 0);
-    TrackKey(g_kDodge, CheckHitKey(KEY_INPUT_I) != 0 || CheckHitKey(KEY_INPUT_LSHIFT) != 0);
-
-    if (!UpdateFighterCommon(g_me, g_other, true)) return;
+static void UpdateControlledFighter(Fighter& f, Fighter& opp, ControlState& cs, unsigned short bits) {
+    UpdateControl(cs, bits);
+    if (!UpdateFighterCommon(f, opp, true)) return;
     if (g_readyFightTimer < 80) return;
 
-    UpdateStateSpecials(g_me, g_other);
-    int c = g_me.charaIndex;
+    UpdateStateSpecials(f, opp);
+    int c = f.charaIndex;
+    bool hJ = (cs.held & IN_J) != 0;
+    bool hK = (cs.held & IN_K) != 0;
+    bool hL = (cs.held & IN_L) != 0;
+    bool hSpace = (cs.held & IN_SPACE) != 0;
+    bool hLeft = (cs.held & IN_LEFT) != 0;
+    bool hRight = (cs.held & IN_RIGHT) != 0;
 
-    // ==========================================
     // コンボ抜け（被弾中に SPACE）
-    // ==========================================
-    if (IsHitState(g_me.state) && g_kSpace.pressed) {
-        if (!TryBurst(g_me, g_other)) {
-            SpawnPopup(g_me.x, g_me.y - 90, (g_me.burstCooldown > 0) ? "バースト再使用まで待機" : "バーストにはSP50必要", GRAY);
+    if (IsHitState(f.state) && (cs.pressed & IN_SPACE)) {
+        if (!TryBurst(f, opp)) {
+            SpawnPopup(f.x, f.y - 90, (f.burstCooldown > 0) ? "バースト再使用まで待機" : "バーストにはSP50必要", GRAY);
         }
+    }
+
+    // いのしし：サイコロ回転中の目押し
+    if (f.state == ACT_BOAR_ROLL && !f.boarSuper && f.boarTiming == 0 && (cs.pressed & (IN_J | IN_K | IN_L))) {
+        bool good = (f.animTimer >= BOAR_TIMING_START && f.animTimer <= BOAR_TIMING_END);
+        f.boarTiming = good ? 1 : 2;
+        SpawnPopup(f.x, f.y - 120, good ? "目押し成功!!" : "ズレた…", good ? GREEN : GRAY);
     }
 
     // ==========================================
     // 空N（空中J）＞空SP（黒閃＆パチンコ風覚醒キャンセル）
     // ==========================================
-    if (c == 0 && g_me.state == ACT_AIR_LIGHT && !g_me.isGrounded) {
-        if (CheckHitKey(KEY_INPUT_J) && CheckHitKey(KEY_INPUT_K) && g_me.spGauge >= 100) {
-            g_me.spGauge = 0;
-            g_me.hasHit = false;
-            g_me.animTimer = 0;
-            g_me.fromAirLightCombo = true;
-            g_me.state = ACT_SUPER_ENHANCED;
-            g_me.stateTimer = 55;
-            g_me.vx = (float)g_me.dir * 11.5f;
-            g_me.vy = 12.0f;
-            g_superCutinTimer = 60;
-            g_superIsUltimate = true;
-            g_cutinIsCounter = false;
-            g_kokusenStrobe = 45; // 45フレーム空間反転
-            g_superCutinName = "【大当り】真・極点昇天破!! (確変突入)";
-            TriggerScreenShake(22);
-            // 空間を裂く黒閃の稲妻スパーク
-            SpawnSparks(g_me.x, g_me.y, RED, 30, 80.0f);
-            SpawnSparks(g_me.x, g_me.y, YELLOW, 30, 80.0f);
-            return;
-        }
+    if (c == 0 && f.state == ACT_AIR_LIGHT && !f.isGrounded && hJ && hK && f.spGauge >= 100) {
+        f.spGauge = 0;
+        f.hasHit = false;
+        f.animTimer = 0;
+        f.fromAirLightCombo = true;
+        f.state = ACT_SUPER_ENHANCED;
+        f.stateTimer = 55;
+        f.vx = (float)f.dir * 11.5f;
+        f.vy = 12.0f;
+        g_superCutinTimer = 60;
+        g_superIsUltimate = true;
+        g_cutinIsCounter = false;
+        g_kokusenStrobe = 45; // 45フレーム空間反転
+        g_superCutinName = "【大当り】真・極点昇天破!! (確変突入)";
+        TriggerScreenShake(22);
+        // 空間を裂く黒閃の稲妻スパーク
+        SpawnSparks(f.x, f.y, RED, 30, 80.0f);
+        SpawnSparks(f.x, f.y, YELLOW, 30, 80.0f);
+        RecordMoveStart(f);
+        return;
     }
 
     // 空中SP技
-    if (c == 0 && !g_me.isGrounded && g_me.state == ACT_IDLE) {
-        if (CheckHitKey(KEY_INPUT_J) && CheckHitKey(KEY_INPUT_K) && g_me.spGauge >= 100) {
-            g_me.spGauge = 0;
-            g_me.hasHit = false;
-            g_me.animTimer = 0;
-            g_me.fromAirLightCombo = false;
-            g_me.state = ACT_SUPER_AIR;
-            g_me.stateTimer = 45;
-            g_me.vx = (float)g_me.dir * 9.5f;
-            g_me.vy = 14.0f;
-            g_superCutinTimer = 45;
-            g_superIsUltimate = false;
-            g_cutinIsCounter = false;
-            g_superCutinName = "=== 天翔・金剛螺旋脚 (AIR SUPER) ===";
-            TriggerScreenShake(12);
-            SpawnSparks(g_me.x, g_me.y, ORANGE, 15, 45.0f);
-            return;
-        }
+    if (c == 0 && !f.isGrounded && f.state == ACT_IDLE && hJ && hK && f.spGauge >= 100) {
+        f.spGauge = 0;
+        f.hasHit = false;
+        f.animTimer = 0;
+        f.fromAirLightCombo = false;
+        f.state = ACT_SUPER_AIR;
+        f.stateTimer = 45;
+        f.vx = (float)f.dir * 9.5f;
+        f.vy = 14.0f;
+        g_superCutinTimer = 45;
+        g_superIsUltimate = false;
+        g_cutinIsCounter = false;
+        g_superCutinName = "=== 天翔・金剛螺旋脚 (AIR SUPER) ===";
+        TriggerScreenShake(12);
+        SpawnSparks(f.x, f.y, ORANGE, 15, 45.0f);
+        RecordMoveStart(f);
+        return;
     }
 
-    // ==========================================
     // 空中アクション：W再入力で2段ジャンプ / SS急降下 / AA・DD空中ダッシュ
-    // ==========================================
-    if (!g_me.isGrounded && (g_me.state == ACT_IDLE || g_me.state == ACT_AIR_LIGHT)) {
-        if (g_me.state == ACT_IDLE && g_kW.pressed && !g_me.doubleJumpUsed && c != 4) {
-            g_me.vy = CHARA_PROFILES[c].jumpPower * 0.85f;
-            g_me.doubleJumpUsed = true;
-            SpawnHitFX(g_me.x, g_me.y + 10, WHITE, 8);
+    if (!f.isGrounded && (f.state == ACT_IDLE || f.state == ACT_AIR_LIGHT)) {
+        if (f.state == ACT_IDLE && (cs.pressed & IN_UP) && !f.doubleJumpUsed && c != 4) {
+            f.vy = CHARA_PROFILES[c].jumpPower * 0.85f;
+            f.doubleJumpUsed = true;
+            SpawnHitFX(f.x, f.y + 10, WHITE, 8);
         }
-        if (g_kS.doubleTap) {
-            g_me.vy = 17.0f;
-            SpawnHitFX(g_me.x, g_me.y - 30, WHITE, 6);
+        if (cs.dbl & IN_DOWN) {
+            f.vy = 17.0f;
+            SpawnHitFX(f.x, f.y - 30, WHITE, 6);
         }
-        if (g_me.state == ACT_IDLE && !g_me.airDashUsed && (g_kA.doubleTap || g_kD.doubleTap)) {
-            int md = g_kA.doubleTap ? -1 : 1;
-            g_me.vx = (float)md * CHARA_PROFILES[c].dashSpeed * 0.9f;
-            if (g_me.vy > -2.0f) g_me.vy = -2.0f;
-            g_me.airDashUsed = true;
-            SpawnHitFX(g_me.x - (float)md * 15.0f, g_me.y - 10, WHITE, 6);
+        if (f.state == ACT_IDLE && !f.airDashUsed && (cs.dbl & (IN_LEFT | IN_RIGHT))) {
+            int md = (cs.dbl & IN_LEFT) ? -1 : 1;
+            f.vx = (float)md * CHARA_PROFILES[c].dashSpeed * 0.9f;
+            if (f.vy > -2.0f) f.vy = -2.0f;
+            f.airDashUsed = true;
+            SpawnHitFX(f.x - (float)md * 15.0f, f.y - 10, WHITE, 6);
         }
     }
 
-    bool isBackKey = (g_me.dir == 1) ? CheckHitKey(KEY_INPUT_A) : CheckHitKey(KEY_INPUT_D);
-    if (g_me.state == ACT_IDLE && g_me.isGrounded && isBackKey) {
-        g_me.state = ACT_GUARD;
+    // パリィの受付が切れても SPACE を押し続けていればガードへ移行
+    if (f.state == ACT_PARRY && f.parryWindow == 0 && hSpace && f.isGrounded) {
+        f.state = ACT_GUARD;
+        f.stateTimer = 0;
+        f.animTimer = 0;
     }
-    else if (g_me.state == ACT_GUARD && (!isBackKey || !g_me.isGrounded)) {
-        g_me.state = ACT_IDLE;
+    // SPACE を離したらガード解除（ガード硬直中は解除できない）
+    if (f.state == ACT_GUARD && f.stateTimer == 0 && f.guardStun == 0 && (!hSpace || !f.isGrounded)) {
+        f.state = ACT_IDLE;
+        f.animTimer = 0;
     }
 
     // 地上ダッシュ（AA / DD）
-    if (g_me.isGrounded && (g_me.state == ACT_IDLE || g_me.state == ACT_GUARD) && (g_kA.doubleTap || g_kD.doubleTap) && g_me.stamina >= 6.0f) {
-        g_me.stamina -= 6.0f;
-        StartDash(g_me, g_kA.doubleTap ? -1 : 1);
+    if (f.isGrounded && f.state == ACT_IDLE && (cs.dbl & (IN_LEFT | IN_RIGHT)) && f.stamina >= 6.0f) {
+        f.stamina -= 6.0f;
+        StartDash(f, (cs.dbl & IN_LEFT) ? -1 : 1);
     }
 
     // 回避（I / 左Shift）：押している方向へ、何も押していなければ後ろへ無敵ロール
-    if (g_kDodge.pressed && g_me.isGrounded && (g_me.state == ACT_IDLE || g_me.state == ACT_GUARD || g_me.state == ACT_DASH) && g_me.stamina >= 18.0f) {
-        int md = CheckHitKey(KEY_INPUT_A) ? -1 : (CheckHitKey(KEY_INPUT_D) ? 1 : -g_me.dir);
-        g_me.stamina -= 18.0f;
-        StartDodge(g_me, md);
+    if ((cs.pressed & IN_DODGE) && f.isGrounded && (f.state == ACT_IDLE || f.state == ACT_DASH ||
+        (f.state == ACT_GUARD && f.guardStun == 0)) && f.stamina >= 18.0f) {
+        int md = hLeft ? -1 : (hRight ? 1 : -f.dir);
+        f.stamina -= 18.0f;
+        StartDodge(f, md);
     }
 
-    if (g_me.state == ACT_IDLE || g_me.state == ACT_GUARD || g_me.state == ACT_DASH) {
-        bool dashing = (g_me.state == ACT_DASH);
+    if (f.state == ACT_IDLE || f.state == ACT_DASH) {
+        bool dashing = (f.state == ACT_DASH);
         float speed = CHARA_PROFILES[c].walkSpeed;
 
         if (!dashing) {
-            if (CheckHitKey(KEY_INPUT_A)) g_me.vx = -speed;
-            if (CheckHitKey(KEY_INPUT_D)) g_me.vx = speed;
+            if (hLeft) f.vx = -speed;
+            if (hRight) f.vx = speed;
         }
 
-        if (CheckHitKey(KEY_INPUT_W) && g_me.isGrounded && c != 4) {
-            g_me.vy = CHARA_PROFILES[c].jumpPower;
-            g_me.isGrounded = false;
-            if (dashing) { g_me.state = ACT_IDLE; g_me.stateTimer = 0; g_me.animTimer = 0; }
+        if ((cs.held & IN_UP) && f.isGrounded && c != 4) {
+            f.vy = CHARA_PROFILES[c].jumpPower;
+            f.isGrounded = false;
+            if (dashing) { f.state = ACT_IDLE; f.stateTimer = 0; f.animTimer = 0; }
         }
 
         int jCost = (c == 3) ? 20 : 8;
         int kCost = (c == 3) ? 20 : 22;
         int lCost = (c == 3) ? 20 : 32;
 
-        bool isForwardKey = (g_me.dir == 1) ? CheckHitKey(KEY_INPUT_D) : CheckHitKey(KEY_INPUT_A);
-        if (isForwardKey && CheckHitKey(KEY_INPUT_J) && g_me.isGrounded && g_me.stamina >= 15.0f) {
+        bool isForwardKey = (f.dir == 1) ? hRight : hLeft;
+        if (isForwardKey && hJ && f.isGrounded && f.stamina >= 15.0f) {
             // 投げ
-            g_me.stamina -= 15.0f;
-            g_me.state = ACT_THROW;
-            g_me.stateTimer = 22;
-            g_me.animTimer = 0;
-            g_me.hasHit = false;
+            f.stamina -= 15.0f;
+            f.state = ACT_THROW;
+            f.stateTimer = 22;
+            f.animTimer = 0;
+            f.hasHit = false;
+            RecordMoveStart(f);
             return;
         }
-        else if (CheckHitKey(KEY_INPUT_SPACE) && g_me.isGrounded && g_me.stamina >= 10.0f) {
-            // パリィ（たけしは受付が約3倍）
-            g_me.stamina -= 10.0f;
-            g_me.state = ACT_PARRY;
-            g_me.stateTimer = (c == 8) ? 24 : 18;
-            g_me.animTimer = 0;
-            g_me.parryWindow = (c == 8) ? 14 : 5;
-            g_me.vx = 0;
+        else if ((cs.pressed & IN_SPACE) && f.isGrounded && f.stamina >= 10.0f) {
+            // タイミング押しでパリィ（たけしは受付が約3倍）
+            f.stamina -= 10.0f;
+            f.state = ACT_PARRY;
+            f.stateTimer = (c == 8) ? 22 : 16;
+            f.animTimer = 0;
+            f.parryWindow = (c == 8) ? 14 : 5;
+            f.vx = 0;
         }
-        else if (CheckHitKey(KEY_INPUT_J) && CheckHitKey(KEY_INPUT_K) && g_me.spGauge >= 100 && g_me.isGrounded) {
-            StartSuper(g_me, g_other);
+        else if (hSpace && f.isGrounded) {
+            // 押しっぱなしはガード
+            f.state = ACT_GUARD;
+            f.stateTimer = 0;
+            f.animTimer = 0;
+            f.vx = 0;
+        }
+        else if (hJ && hK && f.spGauge >= 100 && f.isGrounded) {
+            StartSuper(f, opp);
             return;
         }
-        else if (CheckHitKey(KEY_INPUT_J) && g_me.stamina >= jCost) {
-            if (StartAttack(g_me, g_other, 0)) g_me.stamina -= jCost;
+        else if (hJ && f.stamina >= jCost) {
+            if (StartAttack(f, opp, 0)) f.stamina -= jCost;
         }
-        else if (CheckHitKey(KEY_INPUT_K) && g_me.stamina >= kCost) {
-            if (StartAttack(g_me, g_other, 1)) g_me.stamina -= kCost;
+        else if (hK && f.stamina >= kCost) {
+            if (StartAttack(f, opp, 1)) f.stamina -= kCost;
         }
-        else if (CheckHitKey(KEY_INPUT_L) && g_me.stamina >= lCost) {
-            if (StartAttack(g_me, g_other, 2)) g_me.stamina -= lCost;
+        else if (hL && f.stamina >= lCost) {
+            if (StartAttack(f, opp, 2)) f.stamina -= lCost;
         }
     }
-    else if (g_me.state == ACT_LIGHT1 && g_me.hasHit && CheckHitKey(KEY_INPUT_J) && g_me.stamina >= 8.0f) {
-        g_me.stamina -= 8.0f;
-        g_me.state = ACT_LIGHT2;
-        g_me.stateTimer = 20;
-        g_me.animTimer = 0;
-        g_me.hasHit = false;
-        g_me.vx = (float)g_me.dir * ((c == 8 || c == 1) ? 1.5f : 3.5f);
+    else if (f.state == ACT_LIGHT1 && f.hasHit && hJ && f.stamina >= 8.0f && c != 3) {
+        f.stamina -= 8.0f;
+        f.state = ACT_LIGHT2;
+        f.stateTimer = 20;
+        f.animTimer = 0;
+        f.hasHit = false;
+        f.vx = (float)f.dir * ((c == 8 || c == 1) ? 1.5f : 3.5f);
+        RecordMoveStart(f);
     }
 
-    CheckAttackHit(g_me, g_other);
+    CheckAttackHit(f, opp);
 }
 
 // ----------------------------------------------------
@@ -2137,12 +2774,15 @@ static void CpuStartState(ActionState st, int timer) {
     g_other.animTimer = 0;
     g_other.hasHit = false;
     g_other.whiffChecked = false;
+    RecordMoveStart(g_other);
 }
 
+// stage < 0 はトレーニングの「CPU行動」（キャラに合った技を素直に振る）
 static void CpuThink(int stage, const CpuBossData& boss) {
     int hard = GetHardLevel();
     float dist = fabsf(g_me.x - g_other.x);
     float speed = CHARA_PROFILES[g_other.charaIndex].walkSpeed;
+    bool generic = (stage < 0);
 
     // 相手の空振り・転倒・挑発には全力で差し込む
     bool playerOpen = (g_me.whiffChecked && !g_me.hasHit &&
@@ -2150,7 +2790,10 @@ static void CpuThink(int stage, const CpuBossData& boss) {
         || g_me.state == ACT_SLIP || g_me.state == ACT_TAUNT;
     if (playerOpen) {
         g_other.vx = (float)g_other.dir * speed * 2.2f;
-        if (dist <= 90.0f && g_other.isGrounded) CpuStartState(ACT_SKILL_ATTACK, 34);
+        if (dist <= 90.0f && g_other.isGrounded) {
+            if (generic) StartAttack(g_other, g_me, 2);
+            else CpuStartState(ACT_SKILL_ATTACK, 34);
+        }
         return;
     }
 
@@ -2178,6 +2821,15 @@ static void CpuThink(int stage, const CpuBossData& boss) {
             g_other.stateTimer = 20;
             return;
         }
+    }
+
+    if (generic) {
+        g_other.vx = (float)g_other.dir * speed;
+        if (dist > 150.0f && rand() % 70 == 0) { StartAttack(g_other, g_me, 1); return; }
+        if (dist <= ((g_other.charaIndex == 4) ? 260.0f : 85.0f) && g_other.isGrounded && rand() % 12 == 0) {
+            StartAttack(g_other, g_me, rand() % 3);
+        }
+        return;
     }
 
     if (stage == 1) {
@@ -2278,7 +2930,54 @@ static void UpdateCpu() {
     CheckAttackHit(g_other, g_me);
 }
 
-static void UpdateShotsAndFX() {
+// トレーニングのダミー（6:CPU行動 以外は絶対に攻撃してこない）
+static void UpdateDummy() {
+    Fighter& d = g_other;
+    if (!UpdateFighterCommon(d, g_me, false)) return;
+    UpdateStateSpecials(d, g_me);
+
+    d.crouching = (g_dummyMode == DUMMY_CROUCH_GUARD);
+    bool freeGuard = (d.state == ACT_GUARD && d.stateTimer == 0 && d.guardStun == 0);
+
+    switch (g_dummyMode) {
+    case DUMMY_STOP:
+        if (freeGuard) d.state = ACT_IDLE;
+        break;
+    case DUMMY_STAND_GUARD:
+    case DUMMY_CROUCH_GUARD:
+        if (d.state == ACT_IDLE && d.isGrounded) {
+            d.state = ACT_GUARD;
+            d.stateTimer = 0;
+        }
+        break;
+    case DUMMY_RANDOM_JUMP:
+        if (freeGuard) d.state = ACT_IDLE;
+        if (d.state == ACT_IDLE && d.isGrounded && d.charaIndex != 4 && rand() % 40 == 0) {
+            d.vy = CHARA_PROFILES[d.charaIndex].jumpPower;
+            d.isGrounded = false;
+        }
+        break;
+    case DUMMY_RANDOM_GUARD:
+        if (freeGuard) d.state = ACT_IDLE;
+        if (d.state == ACT_IDLE && d.isGrounded && IsAttackState(g_me.state) && g_me.animTimer == 0 && rand() % 2 == 0) {
+            d.state = ACT_GUARD;
+            d.stateTimer = 30;
+        }
+        break;
+    case DUMMY_CPU:
+        if (freeGuard) d.state = ACT_IDLE;
+        if (d.state == ACT_IDLE) CpuThink(-1, TRAINING_BOSS);
+        CheckAttackHit(d, g_me);
+        break;
+    default:
+        break;
+    }
+}
+
+// ----------------------------------------------------
+// エフェクト・弾の更新
+// ----------------------------------------------------
+static void UpdateEffects() {
     if (g_superCutinTimer > 0) g_superCutinTimer--;
     if (g_kokusenStrobe > 0) g_kokusenStrobe--;
     if (g_flashTimer > 0) g_flashTimer--;
@@ -2314,7 +3013,9 @@ static void UpdateShotsAndFX() {
         g_popups[i].y -= 0.6f;
         if (--g_popups[i].life <= 0) g_popups[i].active = false;
     }
+}
 
+static void UpdateShots() {
     for (int i = 0; i < MAX_SHOTS; i++) {
         if (!g_shots[i].active) continue;
         g_shots[i].x += g_shots[i].vx;
@@ -2335,33 +3036,25 @@ static void UpdateShotsAndFX() {
         Fighter& def = g_shots[i].isFromMe ? g_other : g_me;
         Fighter& atk = g_shots[i].isFromMe ? g_me : g_other;
 
-        float defHitW = 30.0f;
-        float defCenterX = def.x;
-        if (def.charaIndex == 2) {
-            if (def.state == ACT_LIGHT1) {
-                defHitW = 130.0f;
-                defCenterX = def.x + (float)def.dir * 65.0f;
-            }
-            else if (def.state == ACT_MID_ATTACK) {
-                defHitW = 160.0f;
-                defCenterX = def.x + (float)def.dir * 80.0f;
-            }
-        }
+        float hcx, hcy, hw, hh;
+        GetHurtBox(def, hcx, hcy, hw, hh);
 
         if (g_shots[i].damage > 0 && def.invulFrames == 0 &&
-            fabsf(g_shots[i].x - defCenterX) < (defHitW / 2.0f + 15.0f) && fabsf(g_shots[i].y - (def.y - 15)) < 35.0f) {
+            fabsf(g_shots[i].x - hcx) < (hw / 2.0f + 15.0f) && fabsf(g_shots[i].y - (hcy - 15)) < hh / 2.0f + 10.0f) {
             bool reflect = (def.state == ACT_PARRY && def.parryWindow > 0) ||
                 (def.state == ACT_COUNTER_STANCE && def.stanceLevel >= 2);
             if (reflect) {
                 g_shots[i].vx *= -1.3f;
                 g_shots[i].isFromMe = !g_shots[i].isFromMe;
                 def.spGauge += 20; if (def.spGauge > 100) def.spGauge = 100;
+                g_stats[FighterIndex(def)].parries++;
+                if (&def == &g_me) LogComboTag(def.state == ACT_PARRY ? TAG_PARRY : TAG_COUNTER_SUPER);
                 SpawnHitFX(def.x, def.y - 15, CYAN, 20);
                 SpawnSparks(def.x, def.y - 15, CYAN, 10, 35.0f);
                 if (def.state == ACT_COUNTER_STANCE) SpawnPopup(def.x, def.y - 90, "見切り!", CYAN);
                 continue;
             }
-            ApplyDamage(def, atk, g_shots[i].damage, 22, (g_shots[i].vx > 0 ? 1.0f : -1.0f) * 5.0f, 0, false, false);
+            ApplyDamage(def, atk, g_shots[i].damage, 22, (g_shots[i].vx > 0 ? 1.0f : -1.0f) * 5.0f, 0, false, false, false, TAG_SHOT);
             g_shots[i].active = false;
             continue;
         }
@@ -2406,19 +3099,52 @@ static void DrawTraps() {
     }
 }
 
+static void DrawHazard() {
+    int ox = g_shakeOffsetX;
+    int oy = g_shakeOffsetY;
+    int floorY = (int)GROUND_Y + 22 + oy;
+    if (!g_gimmick.hazardWarning && !g_gimmick.hazardActive) return;
+
+    int sx1 = (int)(g_gimmick.x - HAZARD_SAFE_HALF) + ox;
+    int sx2 = (int)(g_gimmick.x + HAZARD_SAFE_HALF) + ox;
+
+    if (g_gimmick.hazardWarning) {
+        // 予告：床が黄色く点滅し、カウントダウンを表示
+        if ((g_frameCount / 8) % 2 == 0) {
+            DrawBox(0, floorY, sx1, floorY + 4, YELLOW, TRUE);
+            DrawBox(sx2, floorY, 640, floorY + 4, YELLOW, TRUE);
+            for (int x = 10; x < 640; x += 40) {
+                if (x > sx1 - 10 && x < sx2 + 10) continue;
+                DrawTriangle(x, floorY - 14, x - 8, floorY - 2, x + 8, floorY - 2, YELLOW, FALSE);
+            }
+        }
+        char buf[32];
+        sprintf_s(buf, "感電まで %d", g_gimmick.hazardCountdown);
+        DrawExtendString(232, 120, 2.0, 2.0, buf, (g_frameCount / 8) % 2 ? YELLOW : RED);
+        DrawString(150, 158, "ジャンプ・ガード・緑の安全地帯・コンテナ破壊で回避！", WHITE);
+    }
+    else {
+        DrawBox(0, floorY, sx1, floorY + 4, CYAN, TRUE);
+        DrawBox(sx2, floorY, 640, floorY + 4, CYAN, TRUE);
+        for (int e = 0; e < 10; e++) {
+            int rx = rand() % 640;
+            if (rx > sx1 && rx < sx2) continue;
+            DrawLine(rx, floorY - 2, rx + (rand() % 16 - 8), floorY - 10, YELLOW);
+        }
+    }
+    // 安全地帯（ゴムマット）
+    DrawBox(sx1, floorY - 2, sx2, floorY + 4, GREEN, TRUE);
+    DrawString((sx1 + sx2) / 2 - 16, floorY - 20, "SAFE", GREEN);
+}
+
 static void DrawGimmick(int stageIdx) {
     int ox = g_shakeOffsetX;
     int oy = g_shakeOffsetY;
 
     DrawTraps();
+    if (!g_gimmickEnabled) return;
 
-    if (stageIdx == 1 && g_gimmick.hazardActive) {
-        DrawBox(0, (int)GROUND_Y + 22 + oy, 640, (int)GROUND_Y + 26 + oy, CYAN, TRUE);
-        for (int e = 0; e < 10; e++) {
-            int rx = rand() % 640;
-            DrawLine(rx, (int)GROUND_Y + 20, rx + (rand() % 16 - 8), (int)GROUND_Y + 12, YELLOW);
-        }
-    }
+    if (stageIdx == 1) DrawHazard();
 
     if (g_gimmick.itemActive) {
         int ix = (int)g_gimmick.itemX + ox;
@@ -2448,6 +3174,7 @@ static void DrawGimmick(int stageIdx) {
     unsigned int col = (g_gimmick.hp < g_gimmick.maxHp / 2) ? RED : GRAY;
     DrawBox(x - 17, y - 130, x + 17, y, col, TRUE);
     DrawBox(x - 17, y - 130, x + 17, y, WHITE, FALSE);
+    if (stageIdx == 1) DrawString(x - 8, y - 120, "電", YELLOW);
 
     if (g_gimmick.hp < g_gimmick.maxHp) {
         DrawLine(x - 8, y - 100, x + 5, y - 70, YELLOW);
@@ -2482,10 +3209,7 @@ static void DrawMegatonPole(const Fighter& f, int bx, int by) {
     else if (f.state == ACT_SKILL_ATTACK) {
         if (f.animTimer < fd.startup) DrawPole(sx, sy, f.dir, -1.57f - 0.35f * t, 190, false);
         else if (active) DrawPole(sx, sy, f.dir, 0.55f, 190, true);
-        else {
-            DrawPole(sx, sy, f.dir, 0.7f, 180, false);
-            if (f.animTimer % 4 == 0) SpawnHitFX(f.x + f.dir * 140, GROUND_Y + 15, GRAY, 1);
-        }
+        else DrawPole(sx, sy, f.dir, 0.7f, 180, false);
     }
     else if (f.state == ACT_SUPER_ATTACK) {
         DrawPole(sx, sy, f.dir, (float)f.animTimer * 0.5f, 320, active);
@@ -2546,7 +3270,6 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
 
     unsigned int col = CHARA_PROFILES[c].baseColor;
     if (f.state == ACT_PARRY) col = CYAN;
-    if (f.state == ACT_GUARD) col = BLUE;
     if (f.state == ACT_STUN) col = (rand() % 2 == 0) ? YELLOW : GRAY;
     if (f.state == ACT_HIT || f.state == ACT_AIR_HIT) col = WHITE;
     if (f.state == ACT_SUPER_ENHANCED || f.state == ACT_SUPER_AIR) col = (rand() % 2 == 0) ? RED : YELLOW;
@@ -2558,6 +3281,11 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
 
     int bw = (c == 4) ? 24 : 14;
     int bh = (c == 4) ? 28 : 22;
+    bool crouchPose = f.crouching && (f.state == ACT_IDLE || f.state == ACT_GUARD);
+    if (crouchPose) {
+        by += bh * 4 / 10;
+        bh = bh * 6 / 10;
+    }
 
     int markerBaseY = by - bh - 24;
     if (isYou) {
@@ -2566,19 +3294,30 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
         DrawTriangle(bx - 6, markerBaseY - 2, bx + 6, markerBaseY - 2, bx, markerBaseY + 6, WHITE, FALSE);
     }
     else {
-        const char* targetLabel = g_is_net_battle ? "2P" : "COM";
+        const char* targetLabel = g_is_net_battle ? "2P" : ((g_mode == MODE_TRAINING) ? "DUMMY" : "COM");
         unsigned int markerCol = g_is_net_battle ? BLUE : RED;
-        DrawString(bx - (g_is_net_battle ? 8 : 12), markerBaseY - 14, targetLabel, markerCol);
+        int lw = GetDrawStringWidth(targetLabel, (int)strlen(targetLabel));
+        DrawString(bx - lw / 2, markerBaseY - 14, targetLabel, markerCol);
         DrawTriangle(bx - 6, markerBaseY - 2, bx + 6, markerBaseY - 2, bx, markerBaseY + 6, markerCol, TRUE);
         DrawTriangle(bx - 6, markerBaseY - 2, bx + 6, markerBaseY - 2, bx, markerBaseY + 6, WHITE, FALSE);
     }
 
-    // いのししのサイコロ
+    // いのししのサイコロと目押しバー
     if (f.state == ACT_BOAR_ROLL || f.diceShowTimer > 0) {
         int dx = bx, dy = by - bh - 72;
         DrawBox(dx - 12, dy - 12, dx + 12, dy + 12, WHITE, TRUE);
-        DrawBox(dx - 12, dy - 12, dx + 12, dy + 12, (f.diceFace == 1) ? RED : BLACK, FALSE);
-        DrawFormatString(dx - 4, dy - 8, (f.diceFace == 1) ? RED : BLACK, "%d", f.diceFace);
+        DrawBox(dx - 12, dy - 12, dx + 12, dy + 12, (f.diceFace <= 2) ? RED : BLACK, FALSE);
+        DrawFormatString(dx - 4, dy - 8, (f.diceFace <= 2) ? RED : BLACK, "%d", f.diceFace);
+        if (f.state == ACT_BOAR_ROLL && !f.boarSuper) {
+            int barX = dx - 40, barY = dy + 16, barW = 80;
+            DrawBox(barX, barY, barX + barW, barY + 6, GetColor(40, 40, 40), TRUE);
+            int gz1 = barX + barW * BOAR_TIMING_START / BOAR_ROLL_FRAMES;
+            int gz2 = barX + barW * (BOAR_TIMING_END + 1) / BOAR_ROLL_FRAMES;
+            DrawBox(gz1, barY, gz2, barY + 6, GREEN, TRUE);
+            int cur = barX + barW * ClampI(f.animTimer, 0, BOAR_ROLL_FRAMES) / BOAR_ROLL_FRAMES;
+            DrawLine(cur, barY - 3, cur, barY + 9, WHITE, 2);
+            DrawBox(barX, barY, barX + barW, barY + 6, WHITE, FALSE);
+        }
     }
 
     // 無敵中は半透明
@@ -2650,7 +3389,7 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
     }
 
     if (c == 2) {
-        if (f.state == ACT_LIGHT1) {
+        if (f.state == ACT_LIGHT1 || f.state == ACT_LIGHT2) {
             int startX = bx + f.dir * bw;
             int startY = by - 10;
             int endX = bx + f.dir * 135;
@@ -2751,7 +3490,7 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
     }
 
     if (!customDrawn) {
-        if (f.state == ACT_LIGHT1 || f.state == ACT_AIR_LIGHT) {
+        if (f.state == ACT_LIGHT1 || f.state == ACT_LIGHT2 || f.state == ACT_AIR_LIGHT) {
             DrawBox(bx + f.dir * bw, by - 14, bx + f.dir * (bw + 28), by + 4, YELLOW, TRUE);
             DrawLine(bx + f.dir * bw, by - 20, bx + f.dir * (bw + 32), by + 10, WHITE);
         }
@@ -2785,7 +3524,15 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
         if (c == 8) DrawCircle(bx + f.dir * 18, by, 32, YELLOW, FALSE, 2);
     }
     else if (f.state == ACT_GUARD) {
-        DrawBox(bx + f.dir * 12, by - 20, bx + f.dir * 18, by + 20, BLUE, TRUE);
+        // ガード中の盾エフェクト（ガード硬直中は明るく光る）
+        int sx = bx + f.dir * (bw + 8);
+        int pulse = (int)(sinf((float)g_frameCount * 0.3f) * 2.0f);
+        SetDrawBlendMode(DX_BLENDMODE_ALPHA, f.guardStun > 0 ? 200 : 110);
+        DrawOval(sx, by, 10 + pulse, bh + 12, f.guardStun > 0 ? WHITE : CYAN, TRUE);
+        SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
+        DrawOval(sx, by, 10 + pulse, bh + 12, BLUE, FALSE);
+        DrawOval(sx, by, 13 + pulse, bh + 15, CYAN, FALSE);
+        DrawString(bx - 20, by - bh - 44, "GUARD", CYAN);
     }
 
     if (f.state == ACT_STUN) {
@@ -2798,12 +3545,85 @@ static void DrawFighterObj(const Fighter& f, bool isYou) {
     SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
 }
 
-static void DrawHud(bool isNet = false) {
+// 当たり判定の表示（トレーニング F1）
+static void DrawHitboxes() {
+    int ox = g_shakeOffsetX;
+    int oy = g_shakeOffsetY + VIS_OFF_Y;
+    const Fighter* fs[2] = { &g_me, &g_other };
+    for (int i = 0; i < 2; i++) {
+        const Fighter& f = *fs[i];
+        const Fighter& opp = *fs[1 - i];
+        float cx, cy, w, h;
+        GetHurtBox(f, cx, cy, w, h);
+        DrawBox((int)(cx - w / 2) + ox, (int)(cy - h / 2) + oy, (int)(cx + w / 2) + ox, (int)(cy + h / 2) + oy,
+            f.invulFrames > 0 ? WHITE : BLUE, FALSE);
+
+        if (f.state == ACT_THROW) {
+            FrameData fd = GetFrameData(f.charaIndex, f.state);
+            bool on = f.animTimer >= fd.startup && f.animTimer < fd.startup + fd.active;
+            DrawBox((int)f.x - 45 + ox, (int)f.y - 35 + oy, (int)f.x + 45 + ox, (int)f.y + 35 + oy, on ? YELLOW : GetColor(120, 100, 30), FALSE);
+            continue;
+        }
+
+        AttackBox b;
+        if (!GetAttackBox(f, fabsf(f.x - opp.x), b)) continue;
+        FrameData fd = GetFrameData(f.charaIndex, f.state);
+        bool active = f.animTimer >= fd.startup && f.animTimer < fd.startup + fd.active;
+        int x1 = (int)(f.x + b.offX - b.w / 2) + ox, y1 = (int)(f.y + b.offY - b.h / 2) + oy;
+        int x2 = (int)(f.x + b.offX + b.w / 2) + ox, y2 = (int)(f.y + b.offY + b.h / 2) + oy;
+        if (active && !f.hasHit) {
+            SetDrawBlendMode(DX_BLENDMODE_ALPHA, 90);
+            DrawBox(x1, y1, x2, y2, RED, TRUE);
+            SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
+            DrawBox(x1, y1, x2, y2, RED, FALSE);
+        }
+        else {
+            DrawBox(x1, y1, x2, y2, GetColor(120, 40, 40), FALSE);
+        }
+    }
+}
+
+enum HudMode { HUD_STORY, HUD_NET, HUD_TRAINING };
+
+static void DrawInputHistory(int y) {
+    int x = 8;
+    for (int i = 0; i < g_inputHistCount; i++) {
+        const InputHistEntry& e = g_inputHist[i];
+        char buf[48] = "";
+        unsigned short b = e.bits;
+        if (b & IN_LEFT)  strcat_s(buf, "←");
+        if (b & IN_RIGHT) strcat_s(buf, "→");
+        if (b & IN_UP)    strcat_s(buf, "↑");
+        if (b & IN_DOWN)  strcat_s(buf, "↓");
+        if (!(b & (IN_LEFT | IN_RIGHT | IN_UP | IN_DOWN))) strcat_s(buf, "・");
+        if (b & IN_J) strcat_s(buf, "J");
+        if (b & IN_K) strcat_s(buf, "K");
+        if (b & IN_L) strcat_s(buf, "L");
+        if (b & IN_SPACE) strcat_s(buf, "_SP");
+        if (b & IN_DODGE) strcat_s(buf, "_回");
+        int w = GetDrawStringWidth(buf, (int)strlen(buf));
+        char fr[8];
+        sprintf_s(fr, "%d", e.frames > 99 ? 99 : e.frames);
+        int fw = GetDrawStringWidth(fr, (int)strlen(fr));
+        if (x + w + fw + 10 > 632) {
+            if (y > 450) break;
+            x = 8;
+            y += 18;
+        }
+        unsigned int col = (i == 0) ? YELLOW : ((b & (IN_J | IN_K | IN_L | IN_SPACE | IN_DODGE)) ? WHITE : GRAY);
+        DrawBox(x - 2, y - 1, x + w + fw + 6, y + 16, GetColor(10, 10, 20), TRUE);
+        DrawString(x, y, buf, col);
+        DrawString(x + w + 3, y, fr, GRAY);
+        x += w + fw + 12;
+    }
+}
+
+static void DrawHud(HudMode hud) {
     int ox = g_shakeOffsetX;
     int oy = g_shakeOffsetY;
+    bool isNet = (hud == HUD_NET);
 
-    int stage = isNet ? g_selectedNetStage : g_slots[g_currentSlot].stageProgress;
-    stage = ClampI(stage, 0, LAST_STAGE);
+    int stage = ClampI(g_slots[g_currentSlot].stageProgress, 0, LAST_STAGE);
 
     // 1P: 大型HPゲージ
     DrawBox(30, 20, 280, 44, GetColor(50, 15, 15), TRUE);
@@ -2812,8 +3632,11 @@ static void DrawHud(bool isNet = false) {
     unsigned int hpCol1 = (myHpR < 0.25f) ? RED : ((myHpR < 0.5f) ? YELLOW : GREEN);
     DrawBox(30, 20, 30 + (int)(250.0f * myHpR), 44, hpCol1, TRUE);
     DrawBox(30, 20, 280, 44, WHITE, FALSE);
-    if (isNet) {
+    if (hud == HUD_NET) {
         DrawFormatString(32, 5, WHITE, "1P: YOU [%s]", CHARA_PROFILES[g_me.charaIndex].charaId);
+    }
+    else if (hud == HUD_TRAINING) {
+        DrawFormatString(32, 5, WHITE, "TRAINING: %s", CHARA_PROFILES[g_me.charaIndex].charaId);
     }
     else {
         DrawFormatString(32, 5, WHITE, "DATA %d: %s", g_currentSlot + 1, CHARA_PROFILES[g_me.charaIndex].charaId);
@@ -2834,8 +3657,11 @@ static void DrawHud(bool isNet = false) {
     unsigned int hpCol2 = (otherHpR < 0.25f) ? RED : ((otherHpR < 0.5f) ? YELLOW : GREEN);
     DrawBox(610 - (int)(250.0f * otherHpR), 20, 610, 44, hpCol2, TRUE);
     DrawBox(360, 20, 610, 44, WHITE, FALSE);
-    if (isNet) {
+    if (hud == HUD_NET) {
         DrawFormatString(450, 5, WHITE, "2P: REMOTE [%s]", CHARA_PROFILES[g_other.charaIndex].charaId);
+    }
+    else if (hud == HUD_TRAINING) {
+        DrawFormatString(400, 5, WHITE, "DUMMY: %s", CHARA_PROFILES[g_other.charaIndex].charaId);
     }
     else {
         DrawFormatString(430, 5, WHITE, "%s - %s", CPU_ROSTER[stage].name, CPU_ROSTER[stage].alias);
@@ -2851,11 +3677,13 @@ static void DrawHud(bool isNet = false) {
 
     // タイマー
     DrawBox(292, 16, 348, 52, GetColor(20, 20, 30), TRUE);
-    DrawBox(292, 16, 348, 52, (g_roundTime <= 10) ? RED : YELLOW, FALSE);
-    DrawFormatString(304, 24, (g_roundTime <= 10) ? RED : YELLOW, "%02d", g_roundTime);
+    bool infiniteTime = (hud == HUD_TRAINING) || (isNet && g_netRules.timeLimit == 0);
+    DrawBox(292, 16, 348, 52, (!infiniteTime && g_roundTime <= 10) ? RED : YELLOW, FALSE);
+    if (infiniteTime) DrawString(312, 24, "∞", YELLOW);
+    else DrawFormatString(304, 24, (g_roundTime <= 10) ? RED : YELLOW, "%02d", g_roundTime);
 
     // 周回・難易度
-    if (!isNet) {
+    if (hud == HUD_STORY) {
         int hard = GetHardLevel();
         DrawFormatString(288, 60, hard > 0 ? ORANGE : GRAY, "%d周目", GetCurrentLap());
         if (hard > 0) DrawFormatString(286, 76, RED, "HARD+%d", hard);
@@ -2863,6 +3691,15 @@ static void DrawHud(bool isNet = false) {
             char bars[16] = "";
             for (int i = 0; i < g_cpuTilt && i < 6; i++) strcat_s(bars, "■");
             DrawFormatString(400, 62, RED, "COMイライラ %s", bars);
+        }
+    }
+
+    // 通信対戦：取得ラウンド
+    if (isNet) {
+        int myIdx = g_is_host ? 0 : 1;
+        for (int r = 0; r < g_netRules.roundsToWin; r++) {
+            DrawCircle(250 - r * 16, 64, 6, (r < g_netRounds[myIdx]) ? YELLOW : GetColor(60, 60, 60), TRUE);
+            DrawCircle(390 + r * 16, 64, 6, (r < g_netRounds[1 - myIdx]) ? YELLOW : GetColor(60, 60, 60), TRUE);
         }
     }
 
@@ -2884,7 +3721,7 @@ static void DrawHud(bool isNet = false) {
     }
 
     // コンボ通知
-    if (g_me.comboCount > 1 && g_me.comboDisplayTimer > 0) {
+    if (hud != HUD_TRAINING && g_me.comboCount > 1 && g_me.comboDisplayTimer > 0) {
         DrawBox(35, 95, 250, 138, GetColor(0, 0, 0), TRUE);
         DrawBox(35, 95, 250, 138, YELLOW, FALSE);
         DrawFormatString(45, 100, YELLOW, "%d HITS COMBO !!", g_me.comboCount);
@@ -2934,19 +3771,27 @@ static void DrawHud(bool isNet = false) {
         }
     }
 
-    if (g_readyFightTimer < 50) {
-        DrawBox(220, 195, 420, 245, GetColor(0, 0, 0), TRUE);
-        DrawBox(220, 195, 420, 245, YELLOW, FALSE);
-        DrawString(285, 212, "READY ?", YELLOW);
-    }
-    else if (g_readyFightTimer < 80) {
-        DrawBox(200, 190, 440, 250, GetColor(0, 0, 0), TRUE);
-        DrawBox(200, 190, 440, 250, RED, FALSE);
-        DrawString(280, 210, "F I G H T !!", RED);
+    if (hud != HUD_TRAINING) {
+        if (g_readyFightTimer < 50) {
+            DrawBox(220, 195, 420, 245, GetColor(0, 0, 0), TRUE);
+            DrawBox(220, 195, 420, 245, YELLOW, FALSE);
+            if (isNet) DrawFormatString(278, 212, YELLOW, "ROUND %d", g_netRoundNo);
+            else DrawString(285, 212, "READY ?", YELLOW);
+        }
+        else if (g_readyFightTimer < 80) {
+            DrawBox(200, 190, 440, 250, GetColor(0, 0, 0), TRUE);
+            DrawBox(200, 190, 440, 250, RED, FALSE);
+            DrawString(280, 210, "F I G H T !!", RED);
+        }
     }
 
-    DrawString(25, 444, "[A/D]移動 [AA/DD]ダッシュ [W]跳 [空中W]2段 [空中SS]急降下 [I/Shift]回避", WHITE);
-    DrawString(25, 462, "[J/K/L]攻撃 [前+J]投げ [J+K]超必 [SPACE]パリィ(被弾中:バースト)", WHITE);
+    if (hud == HUD_TRAINING && g_showInput) {
+        DrawInputHistory(444);
+    }
+    else {
+        DrawString(25, 444, "[A/D]移動 [AA/DD]ダッシュ [W]跳/空中W:2段 [空中SS]急降下 [I]回避 [TAB]技表", WHITE);
+        DrawString(25, 462, "[J/K/L]攻撃 [前+J]投げ [J+K]超必 [SPACE]長押しガード/タイミングでパリィ", WHITE);
+    }
 
     for (int i = 0; i < MAX_SHOTS; i++) {
         if (!g_shots[i].active) continue;
@@ -3001,6 +3846,118 @@ static void DrawHud(bool isNet = false) {
         DrawBox(0, 0, 640, 480, WHITE, TRUE);
         SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
     }
+}
+
+// トレーニングの情報パネル
+static void DrawTrainingOverlay() {
+    DrawString(8, 62, "F1判定 F2フレーム F3入力 F4SP無限 F5リセット F6課題 F7画面端 TAB技表", GRAY);
+    DrawFormatString(400, 80, YELLOW, "ダミー: [%d]%s", (int)g_dummyMode + 1, DUMMY_MODE_NAMES[g_dummyMode]);
+    if (g_infiniteSp) DrawString(400, 98, "SP・スタミナ無限 ON", CYAN);
+
+    if (g_showFrames) {
+        DrawBox(6, 80, 336, 156, GetColor(0, 0, 0), TRUE);
+        DrawBox(6, 80, 336, 156, GRAY, FALSE);
+        const MoveInfo& m = g_moveInfo[0];
+        if (m.valid) {
+            DrawFormatString(12, 84, WHITE, "%s", GetMoveName(m.chara, m.state));
+            DrawFormatString(12, 102, CYAN, "発生%dF 持続%dF 硬直%dF (全体%dF)", m.startup, m.active, m.recovery, m.total);
+        }
+        else {
+            DrawString(12, 84, "技を出すとフレームを表示", GRAY);
+        }
+        if (g_adv.valid) {
+            const char* who = g_adv.byDummy ? "ダミーの技" : "自分の技";
+            if (g_adv.launch && !g_adv.guarded) {
+                DrawFormatString(12, 120, GREEN, "%s: 打ち上げ・吹っ飛ばし（追撃可能）", who);
+            }
+            else {
+                DrawFormatString(12, 120, g_adv.adv >= 0 ? GREEN : RED, "%s %s時: %+dF",
+                    who, g_adv.guarded ? "ガード" : "ヒット", g_adv.adv);
+            }
+            if (g_adv.punishable) {
+                DrawString(12, 138, g_adv.byDummy ? "確定反撃チャンス！ 最速技で反撃できる" : "確定反撃あり！ 相手の最速技で反撃される", (g_frameCount / 8) % 2 ? YELLOW : RED);
+            }
+        }
+    }
+
+    // コンボ情報と課題
+    DrawBox(340, 116, 634, 196, GetColor(0, 0, 0), TRUE);
+    DrawBox(340, 116, 634, 196, GRAY, FALSE);
+    if (g_comboHits > 0) DrawFormatString(346, 120, YELLOW, "コンボ: %dHit %dダメージ", g_comboHits, g_comboDmg);
+    else DrawFormatString(346, 120, WHITE, "前回: %dHit %dダメージ", g_lastComboHits, g_lastComboDmg);
+    DrawFormatString(346, 138, ORANGE, "最大: %dHit / %dダメージ", g_maxComboHits, g_maxComboDmg);
+    const ComboChallenge& ch = CHALLENGES[g_me.charaIndex][g_challengeIdx];
+    DrawFormatString(346, 158, g_challengeDone[g_challengeIdx] ? GREEN : CYAN, "課題%d/3%s %s",
+        g_challengeIdx + 1, g_challengeDone[g_challengeIdx] ? "[済]" : "", ch.desc);
+    if (ch.hint[0]) DrawFormatString(346, 176, GRAY, "%s", ch.hint);
+}
+
+// コマンドリスト（TAB）
+static void DrawCommandList(bool training) {
+    SetDrawBlendMode(DX_BLENDMODE_ALPHA, 225);
+    DrawBox(24, 30, 616, 450, GetColor(5, 8, 18), TRUE);
+    SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
+    DrawBox(24, 30, 616, 450, YELLOW, FALSE);
+
+    int pageCount = training ? 3 : 2;
+    int page = ClampI(g_cmdListPage, 0, pageCount - 1);
+    const char* pageName[3] = { "技表・コンボ", "共通システム", "トレーニング操作" };
+    DrawFormatString(40, 40, YELLOW, "コマンドリスト  [%s]  %d/%d", pageName[page], page + 1, pageCount);
+    DrawString(40, 424, "[A/D] キャラ切替   [W/S] ページ切替   [TAB] 閉じる", GRAY);
+
+    int y = 72;
+    if (page == 0) {
+        int c = g_cmdListChara;
+        DrawFormatString(40, y, WHITE, "%s  %s", CHARA_PROFILES[c].charaId, CHARA_PROFILES[c].archetype);
+        y += 26;
+        for (int i = 0; i < CMD_LINES && CMD_LIST[c][i]; i++) {
+            DrawString(48, y, CMD_LIST[c][i], WHITE);
+            y += 20;
+        }
+        y += 8;
+        DrawString(40, y, "▼ おすすめコンボ（トレーニングの課題）", ORANGE);
+        y += 22;
+        for (int i = 0; i < 3; i++) {
+            const ComboChallenge& ch = CHALLENGES[c][i];
+            DrawFormatString(48, y, CYAN, "%d. %s", i + 1, ch.desc);
+            if (ch.hint[0]) DrawFormatString(300, y, GRAY, "%s", ch.hint);
+            y += 20;
+        }
+    }
+    else {
+        const char** lines = (page == 1) ? CMD_COMMON : CMD_TRAINING;
+        for (int i = 0; lines[i]; i++) {
+            DrawString(48, y, lines[i], WHITE);
+            y += 24;
+        }
+    }
+}
+
+// TABでコマンドリストを開閉。開いている間のキー操作も処理する
+static void HandleCommandListKeys(int defaultChara, bool training, bool allowCharaSwitch) {
+    if (KeyHit(KEY_INPUT_TAB)) {
+        g_cmdListOpen = !g_cmdListOpen;
+        if (g_cmdListOpen) {
+            g_cmdListChara = defaultChara;
+            g_cmdListPage = 0;
+        }
+        return;
+    }
+    if (!g_cmdListOpen) return;
+    int pageCount = training ? 3 : 2;
+    if (KeyHit(KEY_INPUT_W) || KeyHit(KEY_INPUT_UP)) g_cmdListPage = (g_cmdListPage + pageCount - 1) % pageCount;
+    if (KeyHit(KEY_INPUT_S) || KeyHit(KEY_INPUT_DOWN)) g_cmdListPage = (g_cmdListPage + 1) % pageCount;
+    if (allowCharaSwitch) {
+        if (KeyHit(KEY_INPUT_A) || KeyHit(KEY_INPUT_LEFT)) g_cmdListChara = (g_cmdListChara + CHARA_COUNT - 1) % CHARA_COUNT;
+        if (KeyHit(KEY_INPUT_D) || KeyHit(KEY_INPUT_RIGHT)) g_cmdListChara = (g_cmdListChara + 1) % CHARA_COUNT;
+    }
+}
+
+static void DrawStatsBlock(int x, int y, int idx, int chara, unsigned int col) {
+    const MatchStats& s = g_stats[idx];
+    DrawFormatString(x, y, col, "使用技 %d回（最多: %s）", s.moves, MostUsedMove(idx, chara));
+    DrawFormatString(x, y + 20, col, "ヒット %d / 被弾 %d / 与ダメージ %d", s.hits, s.taken, s.damage);
+    DrawFormatString(x, y + 40, col, "ガード %d / パリィ %d / 最大コンボ %d", s.guards, s.parries, s.maxCombo);
 }
 
 static void DrawPadlock(int x, int y, int size) {
@@ -3114,6 +4071,21 @@ static void DrawPokeCard(int charaIdx, float offsetX, float scale, bool isSelect
     }
 }
 
+static void DrawStageBackground(int stageIdx) {
+    int oy = g_shakeOffsetY;
+    if (g_kokusenStrobe > 0) {
+        // 黒閃・空間反転ストロボ演出（画面全体が漆黒と真紅に反転）
+        DrawBox(0, 0, 640, 480, (g_kokusenStrobe % 4 < 2) ? GetColor(0, 0, 0) : GetColor(180, 10, 10), TRUE);
+        DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, GetColor(10, 10, 10), TRUE);
+        DrawLine(0, (int)GROUND_Y + 25 + oy, 640, (int)GROUND_Y + 25 + oy, RED);
+    }
+    else {
+        DrawBox(0, 0, 640, 480, STAGES[stageIdx].skyColor, TRUE);
+        DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, STAGES[stageIdx].groundColor, TRUE);
+        DrawLine(0, (int)GROUND_Y + 25 + oy, 640, (int)GROUND_Y + 25 + oy, WHITE);
+    }
+}
+
 // ----------------------------------------------------
 // 周回処理
 // ----------------------------------------------------
@@ -3149,7 +4121,603 @@ static void EnterCharaSelect(bool showUnlockBanner) {
     g_unlockBannerChara = showUnlockBanner ? g_endingUnlockChara : -1;
     g_unlockBannerTimer = (g_unlockBannerChara >= 0) ? 300 : 0;
     g_lockedMsgTimer = 0;
+    g_cmdListOpen = false;
     g_mode = MODE_CHARA_SELECT;
+}
+
+// ----------------------------------------------------
+// トレーニングモード
+// ----------------------------------------------------
+static void ResetTrainingPositions(bool corner) {
+    float myX = corner ? 470.0f : 200.0f;
+    float dmX = corner ? 590.0f : 440.0f;
+    int myChara = g_me.charaIndex, dmChara = g_other.charaIndex;
+    int sp = g_me.spGauge;
+    ResetFighter(g_me, myX, 1, myChara, PlayableMaxHp(myChara));
+    ResetFighter(g_other, dmX, -1, dmChara, CHARA_PROFILES[dmChara].maxHp);
+    g_me.spGauge = sp;
+    for (int i = 0; i < MAX_SHOTS; i++) g_shots[i].active = false;
+    for (int i = 0; i < MAX_TRAPS; i++) g_traps[i].active = false;
+    g_comboLogCount = 0;
+    g_comboHits = 0;
+    g_comboDmg = 0;
+    g_challengeHitThisCombo = false;
+}
+
+static void SetupTraining() {
+    g_is_net_battle = false;
+    g_currentStageIdx = g_trainStage;
+    g_gimmickEnabled = true;
+    InitStageGimmick(g_trainStage);
+    ClearBattleObjects();
+    ResetFighter(g_me, 200.0f, 1, g_trainMyChara, PlayableMaxHp(g_trainMyChara));
+    ResetFighter(g_other, 440.0f, -1, g_trainDummyChara, CHARA_PROFILES[g_trainDummyChara].maxHp);
+    ResetBattleGlobals();
+    ResetMatchStats();
+    g_readyFightTimer = 80;
+    memset(&g_moveInfo, 0, sizeof(g_moveInfo));
+    memset(&g_adv, 0, sizeof(g_adv));
+    g_challengeIdx = 0;
+    for (int i = 0; i < 3; i++) g_challengeDone[i] = false;
+    g_challengeHitThisCombo = false;
+    g_comboLogCount = 0;
+    g_comboHits = g_comboDmg = 0;
+    g_lastComboHits = g_lastComboDmg = 0;
+    g_maxComboHits = g_maxComboDmg = 0;
+    g_inputHistCount = 0;
+    g_dummyNeutralFrames = 0;
+    g_meNeutralFrames = 0;
+}
+
+static void UpdateInputHistory(unsigned short bits) {
+    if (g_inputHistCount > 0 && g_inputHist[0].bits == bits) {
+        if (g_inputHist[0].frames < 999) g_inputHist[0].frames++;
+        return;
+    }
+    int n = (g_inputHistCount < INPUT_HIST_MAX) ? g_inputHistCount : INPUT_HIST_MAX - 1;
+    for (int i = n; i > 0; i--) g_inputHist[i] = g_inputHist[i - 1];
+    g_inputHist[0].bits = bits;
+    g_inputHist[0].frames = 1;
+    if (g_inputHistCount < INPUT_HIST_MAX) g_inputHistCount++;
+}
+
+static void HandleTrainingKeys() {
+    static const int numKeys[6] = { KEY_INPUT_1, KEY_INPUT_2, KEY_INPUT_3, KEY_INPUT_4, KEY_INPUT_5, KEY_INPUT_6 };
+    static const int padKeys[6] = { KEY_INPUT_NUMPAD1, KEY_INPUT_NUMPAD2, KEY_INPUT_NUMPAD3, KEY_INPUT_NUMPAD4, KEY_INPUT_NUMPAD5, KEY_INPUT_NUMPAD6 };
+    for (int i = 0; i < 6; i++) {
+        if (KeyHit(numKeys[i]) || KeyHit(padKeys[i])) {
+            g_dummyMode = (DummyMode)i;
+            if (g_other.state == ACT_GUARD) { g_other.state = ACT_IDLE; g_other.stateTimer = 0; }
+            SpawnPopup(g_other.x, g_other.y - 110, DUMMY_MODE_NAMES[i], YELLOW);
+        }
+    }
+    if (KeyHit(KEY_INPUT_F1)) g_showHitbox = !g_showHitbox;
+    if (KeyHit(KEY_INPUT_F2)) g_showFrames = !g_showFrames;
+    if (KeyHit(KEY_INPUT_F3)) g_showInput = !g_showInput;
+    if (KeyHit(KEY_INPUT_F4)) g_infiniteSp = !g_infiniteSp;
+    if (KeyHit(KEY_INPUT_F5)) ResetTrainingPositions(false);
+    if (KeyHit(KEY_INPUT_F7)) ResetTrainingPositions(true);
+    if (KeyHit(KEY_INPUT_F6)) {
+        g_challengeIdx = (g_challengeIdx + 1) % 3;
+        g_challengeHitThisCombo = false;
+        g_comboLogCount = 0;
+    }
+}
+
+static void UpdateTrainingFrame() {
+    unsigned short bits = ReadLocalBits();
+    if (g_showInput) UpdateInputHistory(bits);
+
+    UpdateControlledFighter(g_me, g_other, g_ctrl[0], bits);
+    UpdateDummy();
+    UpdateTraps();
+    UpdateStageGimmick(g_currentStageIdx);
+    UpdateShots();
+    UpdateEffects();
+
+    if (g_infiniteSp) {
+        g_me.spGauge = 100;
+        g_me.stamina = g_me.maxStamina;
+    }
+
+    // コンボの区切り：ダミーが自由に動ける状態に戻ったら確定
+    bool dummyNeutral = !IsHitState(g_other.state) && g_other.state != ACT_SLIP &&
+        g_other.state != ACT_STUN && g_other.hitStop == 0;
+    if (dummyNeutral) {
+        if (g_comboHits > 0) {
+            g_lastComboHits = g_comboHits;
+            g_lastComboDmg = g_comboDmg;
+            if (g_comboHits > g_maxComboHits) g_maxComboHits = g_comboHits;
+            if (g_comboDmg > g_maxComboDmg) g_maxComboDmg = g_comboDmg;
+        }
+        g_comboHits = 0;
+        g_comboDmg = 0;
+        g_comboLogCount = 0;
+        g_challengeHitThisCombo = false;
+        g_dummyNeutralFrames++;
+    }
+    else {
+        g_dummyNeutralFrames = 0;
+    }
+    if (g_dummyNeutralFrames > 45) g_other.hp = g_other.maxHp;
+    if (g_other.hp <= 0) g_other.hp = 1;
+
+    bool meNeutral = !IsHitState(g_me.state) && g_me.state != ACT_SLIP && g_me.state != ACT_STUN;
+    g_meNeutralFrames = meNeutral ? g_meNeutralFrames + 1 : 0;
+    if (g_meNeutralFrames > 45) g_me.hp = g_me.maxHp;
+    if (g_me.hp <= 0) g_me.hp = 1;
+}
+
+// ----------------------------------------------------
+// 通信対戦（高レベル）
+// ----------------------------------------------------
+static void SetupNetRound() {
+    g_currentStageIdx = g_netRules.stage;
+    g_gimmickEnabled = (g_netRules.gimmickOn != 0);
+    InitStageGimmick(g_netRules.stage);
+    ClearBattleObjects();
+    int charaA = g_is_host ? g_myNetChara : g_enemyNetChara;
+    int charaB = g_is_host ? g_enemyNetChara : g_myNetChara;
+    // ホスト視点：g_me = A（ホスト） / g_other = B（クライアント）
+    Fighter& fa = g_is_host ? g_me : g_other;
+    Fighter& fb = g_is_host ? g_other : g_me;
+    ResetFighter(fa, 160.0f, 1, charaA, PlayableMaxHp(charaA));
+    ResetFighter(fb, 480.0f, -1, charaB, PlayableMaxHp(charaB));
+    ResetBattleGlobals();
+    g_roundTime = (g_netRules.timeLimit == 0) ? 99 : g_netRules.timeLimit;
+    g_netPhase = NP_READY;
+    g_netPhaseTimer = 0;
+    g_remoteQueueCount = 0;
+    g_remoteBits = 0;
+}
+
+static void SetupNetMatch() {
+    g_netRounds[0] = g_netRounds[1] = 0;
+    g_netRoundNo = 1;
+    g_netWinner = 0;
+    g_netGotSnapshot = false;
+    g_netFrame = 0;
+    ResetMatchStats();
+    SetupNetRound();
+}
+
+static void PackFighter(NetFighter& n, const Fighter& f) {
+    n.x = f.x; n.y = f.y; n.vx = f.vx; n.vy = f.vy;
+    n.hp = (short)ClampI(f.hp, -30000, 30000);
+    n.maxHp = (short)f.maxHp;
+    n.state = (unsigned char)f.state;
+    n.dir = (signed char)f.dir;
+    n.chara = (unsigned char)f.charaIndex;
+    n.flags = (unsigned char)((f.isGrounded ? 1 : 0) | (f.invulFrames > 0 ? 2 : 0) | (f.crouching ? 4 : 0) |
+        (f.boarSuper ? 8 : 0) | (f.hasHit ? 16 : 0) | (f.whiffChecked ? 32 : 0) | (f.wallBounceUsed ? 64 : 0));
+    n.animTimer = (short)ClampI(f.animTimer, 0, 30000);
+    n.stateTimer = (short)ClampI(f.stateTimer, 0, 30000);
+    n.sp = (unsigned char)ClampI(f.spGauge, 0, 255);
+    n.stamina = (unsigned char)ClampI((int)f.stamina, 0, 255);
+    n.diceFace = (unsigned char)f.diceFace;
+    n.diceShowTimer = (unsigned char)ClampI(f.diceShowTimer, 0, 255);
+    n.stanceLevel = (unsigned char)f.stanceLevel;
+    n.comboCount = (unsigned char)ClampI(f.comboCount, 0, 255);
+    n.comboDisplayTimer = (unsigned char)ClampI(f.comboDisplayTimer, 0, 255);
+    n.moveDir = (signed char)f.moveDir;
+    n.boarTiming = (unsigned char)f.boarTiming;
+    n.guardStun = (unsigned char)ClampI(f.guardStun, 0, 255);
+}
+
+static void UnpackFighter(Fighter& f, const NetFighter& n) {
+    f.x = n.x; f.y = n.y; f.vx = n.vx; f.vy = n.vy;
+    f.hp = n.hp; f.maxHp = (n.maxHp > 0) ? n.maxHp : 1;
+    f.state = (ActionState)ClampI(n.state, 0, ACT_STATE_COUNT - 1);
+    f.dir = n.dir;
+    f.charaIndex = ClampI(n.chara, 0, CHARA_COUNT - 1);
+    f.isGrounded = (n.flags & 1) != 0;
+    f.invulFrames = (n.flags & 2) ? 2 : 0;
+    f.crouching = (n.flags & 4) != 0;
+    f.boarSuper = (n.flags & 8) != 0;
+    f.hasHit = (n.flags & 16) != 0;
+    f.whiffChecked = (n.flags & 32) != 0;
+    f.wallBounceUsed = (n.flags & 64) != 0;
+    f.animTimer = n.animTimer;
+    f.stateTimer = n.stateTimer;
+    f.spGauge = n.sp;
+    f.stamina = (float)n.stamina;
+    f.maxStamina = 100.0f;
+    f.diceFace = n.diceFace;
+    f.diceShowTimer = n.diceShowTimer;
+    f.stanceLevel = n.stanceLevel;
+    f.comboCount = n.comboCount;
+    f.comboDisplayTimer = n.comboDisplayTimer;
+    f.moveDir = n.moveDir;
+    f.boarTiming = n.boarTiming;
+    f.guardStun = n.guardStun;
+}
+
+static void PackStats(NetStats& n, const MatchStats& s) {
+    n.moves = (short)s.moves; n.hits = (short)s.hits; n.taken = (short)s.taken;
+    n.guards = (short)s.guards; n.parries = (short)s.parries; n.maxCombo = (short)s.maxCombo;
+    n.damage = s.damage;
+}
+
+static void UnpackStats(MatchStats& s, const NetStats& n) {
+    s.moves = n.moves; s.hits = n.hits; s.taken = n.taken;
+    s.guards = n.guards; s.parries = n.parries; s.maxCombo = n.maxCombo;
+    s.damage = n.damage;
+}
+
+static void SendSnapshot() {
+    static NetSnapshot s;
+    memset(&s, 0, sizeof(s));
+    s.frame = ++g_netFrame;
+    PackFighter(s.a, g_me);
+    PackFighter(s.b, g_other);
+    for (int i = 0; i < MAX_SHOTS; i++) {
+        if (!g_shots[i].active) continue;
+        NetShot& ns = s.shots[s.shotCount++];
+        ns.x = g_shots[i].x; ns.y = g_shots[i].y; ns.color = g_shots[i].color;
+        ns.type = (unsigned char)g_shots[i].projType; ns.sub = (unsigned char)g_shots[i].subType;
+        ns.radius = (unsigned char)g_shots[i].radius; ns.fromA = g_shots[i].isFromMe ? 1 : 0;
+    }
+    for (int i = 0; i < MAX_TRAPS; i++) {
+        if (!g_traps[i].active) continue;
+        NetTrap& nt = s.traps[s.trapCount++];
+        nt.x = g_traps[i].x; nt.type = (unsigned char)g_traps[i].type; nt.ownerA = g_traps[i].ownerIsMe ? 1 : 0;
+        nt.life = (short)g_traps[i].life; nt.armDelay = (short)g_traps[i].armDelay;
+    }
+    s.gx = g_gimmick.x; s.gFallAngle = g_gimmick.fallAngle; s.itemX = g_gimmick.itemX;
+    s.ghp = (short)g_gimmick.hp; s.gmaxHp = (short)g_gimmick.maxHp;
+    s.gFlags = (unsigned char)((g_gimmick.isFalling ? 1 : 0) | (g_gimmick.fallen ? 2 : 0) | (g_gimmick.itemActive ? 4 : 0) |
+        (g_gimmick.hazardActive ? 8 : 0) | (g_gimmick.hazardWarning ? 16 : 0));
+    s.gDir = (signed char)g_gimmick.activeHitBox;
+    s.gStageTimer = g_gimmick.stageTimer;
+    s.roundTime = (signed char)g_roundTime;
+    s.readyTimer = (unsigned char)ClampI(g_readyFightTimer, 0, 255);
+    s.phase = (unsigned char)g_netPhase;
+    s.phaseTimer = (unsigned char)ClampI(g_netPhaseTimer, 0, 255);
+    s.roundsA = (unsigned char)g_netRounds[0];
+    s.roundsB = (unsigned char)g_netRounds[1];
+    s.roundNo = (unsigned char)g_netRoundNo;
+    s.winner = (unsigned char)g_netWinner;
+    s.cutinTimer = (unsigned char)ClampI(g_superCutinTimer, 0, 255);
+    s.cutinFlags = (unsigned char)((g_superIsUltimate ? 1 : 0) | (g_cutinIsCounter ? 2 : 0));
+    strncpy_s(s.cutinText, g_superCutinName, _TRUNCATE);
+    s.shake = (unsigned char)ClampI(g_screenShakeTimer, 0, 255);
+    s.flash = (unsigned char)ClampI(g_flashTimer, 0, 255);
+    s.strobe = (unsigned char)ClampI(g_kokusenStrobe, 0, 255);
+    s.parryNotice = (unsigned char)ClampI(g_parryNoticeTimer, 0, 255);
+    s.kokusen = g_isKokusenKoFinish ? 1 : 0;
+    PackStats(s.statsA, g_stats[0]);
+    PackStats(s.statsB, g_stats[1]);
+    s.fxCount = (unsigned char)g_netFxCount;
+    memcpy(s.fx, g_netFxQueue, sizeof(NetFxEvent) * g_netFxCount);
+    s.popupCount = (unsigned char)g_netPopupCount;
+    memcpy(s.popups, g_netPopupQueue, sizeof(NetPopupEvent) * g_netPopupCount);
+    g_netFxCount = 0;
+    g_netPopupCount = 0;
+    SendPacket(PKT_SNAPSHOT, &s, sizeof(s));
+}
+
+// クライアント：ホストから届いた状態をそのまま表示に反映（自分 = B）
+static void ApplySnapshot(const NetSnapshot& s) {
+    UnpackFighter(g_me, s.b);
+    UnpackFighter(g_other, s.a);
+    for (int i = 0; i < MAX_SHOTS; i++) g_shots[i].active = false;
+    for (int i = 0; i < s.shotCount && i < MAX_SHOTS; i++) {
+        const NetShot& ns = s.shots[i];
+        Projectile& p = g_shots[i];
+        p.active = true; p.x = ns.x; p.y = ns.y; p.color = ns.color;
+        p.projType = ns.type; p.subType = ns.sub; p.radius = ns.radius;
+        p.isFromMe = (ns.fromA == 0);
+        p.vx = p.vy = 0; p.damage = 0; p.life = 2;
+    }
+    for (int i = 0; i < MAX_TRAPS; i++) g_traps[i].active = false;
+    for (int i = 0; i < s.trapCount && i < MAX_TRAPS; i++) {
+        const NetTrap& nt = s.traps[i];
+        Trap& t = g_traps[i];
+        t.active = true; t.x = nt.x; t.type = nt.type; t.ownerIsMe = (nt.ownerA == 0);
+        t.life = nt.life; t.armDelay = nt.armDelay;
+    }
+    g_gimmick.x = s.gx; g_gimmick.fallAngle = s.gFallAngle; g_gimmick.itemX = s.itemX; g_gimmick.itemY = GROUND_Y;
+    g_gimmick.hp = s.ghp; g_gimmick.maxHp = (s.gmaxHp > 0) ? s.gmaxHp : 1;
+    g_gimmick.isFalling = (s.gFlags & 1) != 0;
+    g_gimmick.fallen = (s.gFlags & 2) != 0;
+    g_gimmick.itemActive = (s.gFlags & 4) != 0;
+    g_gimmick.hazardActive = (s.gFlags & 8) != 0;
+    g_gimmick.hazardWarning = (s.gFlags & 16) != 0;
+    g_gimmick.activeHitBox = s.gDir;
+    g_gimmick.stageTimer = s.gStageTimer;
+    if (g_gimmick.hazardWarning) {
+        int phase = g_gimmick.stageTimer % HAZARD_PERIOD;
+        g_gimmick.hazardCountdown = (HAZARD_ACTIVE_START - phase + 59) / 60;
+    }
+    g_roundTime = s.roundTime;
+    g_readyFightTimer = s.readyTimer;
+    g_netPhase = (NetPhase)s.phase;
+    g_netPhaseTimer = s.phaseTimer;
+    g_netRounds[0] = s.roundsA;
+    g_netRounds[1] = s.roundsB;
+    g_netRoundNo = s.roundNo;
+    g_netWinner = s.winner;
+    g_superCutinTimer = s.cutinTimer;
+    g_superIsUltimate = (s.cutinFlags & 1) != 0;
+    g_cutinIsCounter = (s.cutinFlags & 2) != 0;
+    strncpy_s(g_netCutinText, s.cutinText, _TRUNCATE);
+    g_superCutinName = g_netCutinText;
+    g_screenShakeTimer = s.shake;
+    g_flashTimer = s.flash;
+    g_kokusenStrobe = s.strobe;
+    g_parryNoticeTimer = s.parryNotice;
+    g_isKokusenKoFinish = (s.kokusen != 0);
+    UnpackStats(g_stats[0], s.statsB);
+    UnpackStats(g_stats[1], s.statsA);
+    for (int i = 0; i < s.fxCount && i < NET_MAX_FX; i++) {
+        const NetFxEvent& e = s.fx[i];
+        if (e.kind == 0) SpawnHitFX(e.x, e.y, e.color, e.count);
+        else SpawnSparks(e.x, e.y, e.color, e.count, (float)e.len);
+    }
+    for (int i = 0; i < s.popupCount && i < NET_MAX_POPUPS; i++) {
+        char text[49];
+        memcpy(text, s.popups[i].text, 48);
+        text[48] = '\0';
+        SpawnPopup(s.popups[i].x, s.popups[i].y, text, s.popups[i].color);
+    }
+    g_netGotSnapshot = true;
+}
+
+static void ProcessPacket(unsigned char type, const char* data, int len) {
+    switch (type) {
+    case PKT_SETUP:
+        if (len == (int)sizeof(NetSetup) && !g_is_host) {
+            memcpy(&g_netRules, data, sizeof(NetSetup));
+            g_netRules.stage = (unsigned char)ClampI(g_netRules.stage, 0, 4);
+            g_netRules.roundsToWin = (unsigned char)ClampI(g_netRules.roundsToWin, 1, 3);
+            g_netRulesReceived = true;
+            g_myNetReady = false;
+            g_enemyNetReady = false;
+            g_mode = MODE_NET_CHARA_SELECT;
+        }
+        break;
+    case PKT_CHARA:
+        if (len == (int)sizeof(NetCharaMsg)) {
+            g_enemyNetChara = ClampI(((const NetCharaMsg*)data)->chara, 0, CHARA_COUNT - 1);
+            g_enemyNetReady = true;
+        }
+        break;
+    case PKT_INPUT:
+        if (len == (int)sizeof(NetInputMsg) && g_is_host) {
+            if (g_remoteQueueCount >= 16) {
+                memmove(g_remoteQueue, g_remoteQueue + 1, sizeof(unsigned short) * 15);
+                g_remoteQueueCount = 15;
+            }
+            g_remoteQueue[g_remoteQueueCount++] = ((const NetInputMsg*)data)->bits;
+        }
+        break;
+    case PKT_SNAPSHOT:
+        if (len == (int)sizeof(NetSnapshot) && !g_is_host && g_mode == MODE_NET_BATTLE_PLAY) {
+            ApplySnapshot(*(const NetSnapshot*)data);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void ReceivePackets() {
+    if (g_peer == INVALID_SOCKET) return;
+    for (;;) {
+        int space = (int)sizeof(g_rx) - g_rx_used;
+        if (space <= 0) { StopNetwork("受信バッファがあふれました"); return; }
+        int n = recv(g_peer, g_rx + g_rx_used, space, 0);
+        if (n == 0) { StopNetwork("相手が切断しました"); return; }
+        if (n == SOCKET_ERROR) {
+            int e = WSAGetLastError();
+            if (e == WSAEWOULDBLOCK) break;
+            StopNetwork("受信エラー"); return;
+        }
+        g_rx_used += n;
+    }
+
+    int pos = 0;
+    while (g_rx_used - pos >= (int)sizeof(NetHeader)) {
+        NetHeader h;
+        memcpy(&h, g_rx + pos, sizeof(h));
+        if (h.magic != MAGIC) { StopNetwork("不正なデータを受信しました"); return; }
+        if (g_rx_used - pos < (int)sizeof(NetHeader) + h.len) break;
+        ProcessPacket(h.type, g_rx + pos + sizeof(NetHeader), h.len);
+        if (g_peer == INVALID_SOCKET) return;
+        pos += sizeof(NetHeader) + h.len;
+    }
+    if (pos > 0) {
+        memmove(g_rx, g_rx + pos, g_rx_used - pos);
+        g_rx_used -= pos;
+    }
+}
+
+static void HandleTextInput(char* buf, int maxLen, bool allowDot) {
+    if (s_keyCooldown > 0) { s_keyCooldown--; return; }
+    int len = (int)strlen(buf);
+    char pressed = 0;
+    if (CheckHitKey(KEY_INPUT_0) || CheckHitKey(KEY_INPUT_NUMPAD0)) pressed = '0';
+    else if (CheckHitKey(KEY_INPUT_1) || CheckHitKey(KEY_INPUT_NUMPAD1)) pressed = '1';
+    else if (CheckHitKey(KEY_INPUT_2) || CheckHitKey(KEY_INPUT_NUMPAD2)) pressed = '2';
+    else if (CheckHitKey(KEY_INPUT_3) || CheckHitKey(KEY_INPUT_NUMPAD3)) pressed = '3';
+    else if (CheckHitKey(KEY_INPUT_4) || CheckHitKey(KEY_INPUT_NUMPAD4)) pressed = '4';
+    else if (CheckHitKey(KEY_INPUT_5) || CheckHitKey(KEY_INPUT_NUMPAD5)) pressed = '5';
+    else if (CheckHitKey(KEY_INPUT_6) || CheckHitKey(KEY_INPUT_NUMPAD6)) pressed = '6';
+    else if (CheckHitKey(KEY_INPUT_7) || CheckHitKey(KEY_INPUT_NUMPAD7)) pressed = '7';
+    else if (CheckHitKey(KEY_INPUT_8) || CheckHitKey(KEY_INPUT_NUMPAD8)) pressed = '8';
+    else if (CheckHitKey(KEY_INPUT_9) || CheckHitKey(KEY_INPUT_NUMPAD9)) pressed = '9';
+    else if (allowDot && (CheckHitKey(KEY_INPUT_PERIOD) || CheckHitKey(KEY_INPUT_DECIMAL))) pressed = '.';
+
+    if (pressed != 0 && len < maxLen - 1) {
+        buf[len] = pressed; buf[len + 1] = '\0';
+        s_keyCooldown = 10;
+    }
+    if (CheckHitKey(KEY_INPUT_BACK)) {
+        if (len > 0) { buf[len - 1] = '\0'; s_keyCooldown = 10; }
+    }
+}
+
+static void OnPeerConnected() {
+    int one = 1;
+    setsockopt(g_peer, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+    SetNonBlocking(g_peer);
+    g_rx_used = 0;
+    g_tx_used = 0;
+    g_myNetReady = false;
+    g_enemyNetReady = false;
+    g_netRulesReceived = false;
+    g_netRuleRow = 0;
+    g_mode = MODE_NET_STAGE_SELECT;
+    SendPacket(PKT_HELLO, NULL, 0);
+}
+
+static void StartHost() {
+    g_is_host = true;
+    g_is_net_battle = true;
+    g_net_room_code = 1000 + rand() % 9000;
+    g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (g_listen == INVALID_SOCKET) { StopNetwork("ソケット初期化失敗"); return; }
+    sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = htons(PORT);
+    if (bind(g_listen, (sockaddr*)&a, sizeof(a)) == SOCKET_ERROR || listen(g_listen, 1) == SOCKET_ERROR) {
+        StopNetwork("ポート27015開放失敗"); return;
+    }
+    SetNonBlocking(g_listen);
+    g_mode = MODE_HOST_WAIT;
+}
+
+static void UpdateHostWait() {
+    SOCKET s = accept(g_listen, NULL, NULL);
+    if (s != INVALID_SOCKET) {
+        g_peer = s;
+        CloseSocket(g_listen);
+        OnPeerConnected();
+    }
+}
+
+static void StartClient(const char* ip) {
+    g_is_host = false;
+    g_is_net_battle = true;
+    g_peer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (g_peer == INVALID_SOCKET) { StopNetwork("ソケット作成失敗"); return; }
+    sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = htons(PORT);
+    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) { StopNetwork("IPアドレス書式不正"); return; }
+    if (connect(g_peer, (sockaddr*)&a, sizeof(a)) == SOCKET_ERROR) { StopNetwork("接続失敗"); return; }
+    OnPeerConnected();
+}
+
+// ホスト：両者の入力で1フレーム進め、結果を送る
+static void NetHostUpdate() {
+    unsigned short localBits = g_cmdListOpen ? 0 : ReadLocalBits();
+    if (g_remoteQueueCount > 0) {
+        // 溜まりすぎたら古い入力を捨てて追いつく
+        if (g_remoteQueueCount > 4) {
+            int drop = g_remoteQueueCount - 2;
+            memmove(g_remoteQueue, g_remoteQueue + drop, sizeof(unsigned short) * (g_remoteQueueCount - drop));
+            g_remoteQueueCount -= drop;
+        }
+        g_remoteBits = g_remoteQueue[0];
+        memmove(g_remoteQueue, g_remoteQueue + 1, sizeof(unsigned short) * (g_remoteQueueCount - 1));
+        g_remoteQueueCount--;
+    }
+
+    g_netRecordFx = true;
+    switch (g_netPhase) {
+    case NP_READY:
+    case NP_FIGHT:
+        if (g_netPhase == NP_READY) {
+            g_readyFightTimer++;
+            if (g_readyFightTimer == 50) TriggerScreenShake(8);
+            if (g_readyFightTimer >= 80) g_netPhase = NP_FIGHT;
+        }
+        else if (g_netRules.timeLimit > 0) {
+            g_battleTimerFrames++;
+            if (g_battleTimerFrames >= 60) {
+                g_battleTimerFrames = 0;
+                if (g_roundTime > 0) g_roundTime--;
+            }
+        }
+        UpdateControlledFighter(g_me, g_other, g_ctrl[0], localBits);
+        UpdateControlledFighter(g_other, g_me, g_ctrl[1], g_remoteBits);
+        UpdateTraps();
+        UpdateStageGimmick(g_currentStageIdx);
+        UpdateShots();
+        UpdateEffects();
+
+        if (g_netPhase == NP_FIGHT) {
+            bool ko = (g_me.hp <= 0 || g_other.hp <= 0);
+            bool timeUp = (g_netRules.timeLimit > 0 && g_roundTime <= 0);
+            if (ko || timeUp) {
+                float ra = (float)g_me.hp / (float)g_me.maxHp;
+                float rb = (float)g_other.hp / (float)g_other.maxHp;
+                int roundWinner;
+                if (ko) roundWinner = (g_me.hp <= 0 && g_other.hp <= 0) ? 3 : ((g_me.hp > 0) ? 1 : 2);
+                else roundWinner = (fabsf(ra - rb) < 0.001f) ? 3 : ((ra > rb) ? 1 : 2);
+                if (roundWinner == 1) g_netRounds[0]++;
+                if (roundWinner == 2) g_netRounds[1]++;
+                g_netWinner = roundWinner;
+                g_netPhase = NP_ROUND_END;
+                g_netPhaseTimer = 0;
+                TriggerScreenShake(16);
+            }
+        }
+        break;
+    case NP_ROUND_END:
+        UpdateEffects();
+        if (++g_netPhaseTimer >= 120) {
+            bool matchOver = g_netRounds[0] >= g_netRules.roundsToWin || g_netRounds[1] >= g_netRules.roundsToWin;
+            if (matchOver) {
+                g_netWinner = (g_netRounds[0] > g_netRounds[1]) ? 1 : ((g_netRounds[1] > g_netRounds[0]) ? 2 : 3);
+                g_netPhase = NP_MATCH_END;
+                g_netPhaseTimer = 0;
+            }
+            else {
+                g_netRoundNo++;
+                g_netWinner = 0;
+                SetupNetRound();
+            }
+        }
+        break;
+    case NP_MATCH_END:
+        UpdateEffects();
+        g_netPhaseTimer++;
+        break;
+    }
+    g_netRecordFx = false;
+    SendSnapshot();
+    if (g_netPhase == NP_MATCH_END && g_netPhaseTimer >= 90) {
+        g_roundWon = (g_netWinner == 1);
+        g_mode = MODE_NET_RESULT;
+    }
+}
+
+// クライアント：入力を送り、届いた状態を表示する
+static void NetClientUpdate() {
+    unsigned short bits = g_cmdListOpen ? 0 : ReadLocalBits();
+    NetInputMsg msg = { ++g_sequence, bits };
+    SendPacket(PKT_INPUT, &msg, sizeof(msg));
+    ReceivePackets();
+    UpdateEffects();
+    if (g_netPhase == NP_MATCH_END && g_netPhaseTimer >= 80) {
+        g_roundWon = (g_netWinner == 2);
+        g_mode = MODE_NET_RESULT;
+    }
+}
+
+static void DrawNetPhaseBanner() {
+    int myWinner = g_is_host ? 1 : 2;
+    if (g_netPhase == NP_ROUND_END) {
+        DrawBox(170, 180, 470, 260, BLACK, TRUE);
+        DrawBox(170, 180, 470, 260, RED, FALSE);
+        const char* text = (g_netWinner == 3) ? "DRAW" : ((g_netWinner == myWinner) ? "ROUND WIN!" : "ROUND LOSE…");
+        DrawString(270, 200, (g_me.hp <= 0 || g_other.hp <= 0) ? "K. O." : "TIME OVER", YELLOW);
+        DrawString(260, 228, text, (g_netWinner == myWinner) ? YELLOW : GRAY);
+    }
+    else if (g_netPhase == NP_MATCH_END) {
+        DrawBox(150, 175, 490, 265, BLACK, TRUE);
+        DrawBox(150, 175, 490, 265, YELLOW, FALSE);
+        const char* text = (g_netWinner == 3) ? "DRAW GAME" : ((g_netWinner == myWinner) ? "YOU WIN!!" : "YOU LOSE…");
+        DrawExtendString(230, 205, 2.0, 2.0, text, (g_netWinner == myWinner) ? YELLOW : RED);
+    }
 }
 
 // ----------------------------------------------------
@@ -3166,6 +4734,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     srand((unsigned int)time(NULL));
     InitMasterData();
     LoadAllSlots();
+    memset(g_keyNow, 0, sizeof(g_keyNow));
+    memset(g_keyPrev, 0, sizeof(g_keyPrev));
 
     // 通信対戦で選べるキャラ（最初から使えるキャラのみ）
     int netCharaList[CHARA_COUNT];
@@ -3173,29 +4743,41 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     for (int i = 0; i < ROSTER_COUNT; i++) {
         if (CHARA_PROFILES[g_rosterOrder[i]].unlockLap <= 1) netCharaList[netCharaCount++] = g_rosterOrder[i];
     }
+    // トレーニングで選べるキャラ
+    int trainCharaList[CHARA_COUNT];
+    int trainCharaCount = 0;
+    int dummyCharaList[CHARA_COUNT];
+    int dummyCharaCount = 0;
 
     while (ProcessMessage() == 0) {
         ClearDrawScreen();
         g_frameCount++;
+        memcpy(g_keyPrev, g_keyNow, sizeof(g_keyNow));
+        GetHitKeyStateAll(g_keyNow);
         if (s_keyCooldown > 0) s_keyCooldown--;
 
         int curStage = ClampI(g_slots[g_currentSlot].stageProgress, 0, LAST_STAGE);
 
         switch (g_mode) {
         case MODE_TITLE: {
+            static const char* items[4] = {
+                "MAIN STORY (CPU勝ち抜き)", "TRAINING (トレーニング)", "LAN VERSUS (ローカル通信対戦)", "EXIT"
+            };
             DrawBox(0, 0, 640, 480, BG_DARK, TRUE);
             DrawString(140, 70, "=== STREET DUEL: ARCADE CLASH ===", YELLOW);
             DrawString(190, 110, "世界格闘チャンピオンシップ", WHITE);
 
-            DrawString(220, 210, (g_titleMenu == 0) ? "> MAIN STORY (CPU勝ち抜き)" : "  MAIN STORY (CPU勝ち抜き)", (g_titleMenu == 0) ? YELLOW : WHITE);
-            DrawString(220, 250, (g_titleMenu == 1) ? "> LAN VERSUS (ローカル通信対戦)" : "  LAN VERSUS (ローカル通信対戦)", (g_titleMenu == 1) ? YELLOW : WHITE);
-            DrawString(220, 290, (g_titleMenu == 2) ? "> EXIT" : "  EXIT", (g_titleMenu == 2) ? YELLOW : WHITE);
+            for (int i = 0; i < 4; i++) {
+                bool sel = (g_titleMenu == i);
+                DrawFormatString(200, 200 + i * 40, sel ? YELLOW : WHITE, "%s%s", sel ? "> " : "  ", items[i]);
+            }
+            if (g_titleMenu == 1) DrawString(150, 370, "システムやキャラの技を自由に練習できます", GRAY);
 
             DrawString(180, 410, "[W/S]: 選択   [ENTER]: 決定", GRAY);
 
             if (s_keyCooldown == 0) {
-                if (CheckHitKey(KEY_INPUT_W) || CheckHitKey(KEY_INPUT_UP)) { g_titleMenu = (g_titleMenu + 2) % 3; s_keyCooldown = 12; }
-                if (CheckHitKey(KEY_INPUT_S) || CheckHitKey(KEY_INPUT_DOWN)) { g_titleMenu = (g_titleMenu + 1) % 3; s_keyCooldown = 12; }
+                if (CheckHitKey(KEY_INPUT_W) || CheckHitKey(KEY_INPUT_UP)) { g_titleMenu = (g_titleMenu + 3) % 4; s_keyCooldown = 12; }
+                if (CheckHitKey(KEY_INPUT_S) || CheckHitKey(KEY_INPUT_DOWN)) { g_titleMenu = (g_titleMenu + 1) % 4; s_keyCooldown = 12; }
                 if (CheckHitKey(KEY_INPUT_RETURN)) {
                     s_keyCooldown = 15;
                     if (g_titleMenu == 0) {
@@ -3203,6 +4785,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                         g_mode = MODE_SLOT_SELECT;
                     }
                     else if (g_titleMenu == 1) {
+                        g_is_net_battle = false;
+                        trainCharaCount = 0;
+                        for (int i = 0; i < ROSTER_COUNT; i++) {
+                            if (IsCharaUnlockedAnySlot(g_rosterOrder[i])) trainCharaList[trainCharaCount++] = g_rosterOrder[i];
+                        }
+                        dummyCharaCount = 0;
+                        for (int i = 0; i < ROSTER_COUNT; i++) dummyCharaList[dummyCharaCount++] = g_rosterOrder[i];
+                        dummyCharaList[dummyCharaCount++] = 5;
+                        g_trainRow = 0;
+                        g_cmdListOpen = false;
+                        g_mode = MODE_TRAINING_SELECT;
+                    }
+                    else if (g_titleMenu == 2) {
                         g_is_net_battle = true;
                         g_mode = MODE_NET_MENU;
                     }
@@ -3285,6 +4880,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             const SaveSlot& slot = g_slots[g_currentSlot];
             int lap = GetCurrentLap();
             int hard = GetHardLevel();
+            int cur = g_rosterOrder[g_charaCursor];
+            bool curLocked = !IsCharaUnlocked(cur);
+
+            HandleCommandListKeys(cur, false, false);
 
             DrawBox(0, 0, 640, 480, GetColor(8, 10, 18), TRUE);
             DrawFormatString(210, 20, YELLOW, "[ DATA %d ] SELECT CARD", g_currentSlot + 1);
@@ -3310,9 +4909,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                     slot.clearRank[c], slot.noContinueClear[c], locked, isNew);
             }
 
-            int cur = g_rosterOrder[g_charaCursor];
-            bool curLocked = !IsCharaUnlocked(cur);
-
             DrawBox(30, 340, 610, 440, GetColor(20, 24, 38), TRUE);
             DrawBox(30, 340, 610, 440, YELLOW, FALSE);
 
@@ -3335,7 +4931,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 }
             }
 
-            DrawString(160, 455, "[A/D]: カードをめくる   [ENTER]: 決定して参戦   [ESC]: 戻る", WHITE);
+            DrawString(80, 455, "[A/D]: カードをめくる  [ENTER]: 決定して参戦  [TAB]: 技表  [ESC]: 戻る", WHITE);
 
             if (g_unlockBannerTimer > 0) {
                 g_unlockBannerTimer--;
@@ -3349,6 +4945,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 DrawBox(150, 190, 490, 230, BLACK, TRUE);
                 DrawBox(150, 190, 490, 230, RED, FALSE);
                 DrawFormatString(170, 202, RED, "まだ使えない！ %d周目で解放されます", CHARA_PROFILES[cur].unlockLap);
+            }
+
+            if (g_cmdListOpen) {
+                if (curLocked) {
+                    g_cmdListOpen = false;
+                    g_lockedMsgTimer = 70;
+                }
+                else {
+                    DrawCommandList(false);
+                }
+                break;
             }
 
             if (s_keyCooldown == 0) {
@@ -3378,7 +4985,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                         s.hadTimeOver = false;
                         s.needCharaSelect = false;
                         SaveCurrentSlot();
-                        g_mode = MODE_VS_SCREEN;
+                        g_mode = MODE_STORY_INTRO;
                         g_phaseTimer = 0;
                     }
                 }
@@ -3386,6 +4993,32 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                     g_mode = MODE_SLOT_SELECT;
                     s_keyCooldown = 15;
                 }
+            }
+            break;
+        }
+
+        case MODE_STORY_INTRO: {
+            g_phaseTimer++;
+            int c = g_slots[g_currentSlot].chosenChara;
+            DrawBox(0, 0, 640, 480, GetColor(10, 8, 20), TRUE);
+            DrawString(260, 50, "- STORY -", YELLOW);
+            DrawFormatString(60, 100, WHITE, "%s", CHARA_PROFILES[c].charaId);
+            DrawFormatString(60, 124, ORANGE, "%s", CHARA_PROFILES[c].archetype);
+            DrawBox(40, 160, 600, 290, GetColor(20, 20, 35), TRUE);
+            DrawBox(40, 160, 600, 290, GRAY, FALSE);
+            for (int i = 0; i < 3; i++) {
+                // 1行ずつ順番に表示
+                if (g_phaseTimer > 20 + i * 40) DrawString(60, 180 + i * 34, STORY_PROLOGUE[c][i], WHITE);
+            }
+            if (GetHardLevel() > 0) {
+                DrawFormatString(60, 310, ORANGE, "%d周目：敵がさらに手強くなっている…！", GetCurrentLap());
+            }
+            DrawString(200, 400, "[Enter]: 戦いへ向かう", (g_frameCount / 20) % 2 ? WHITE : GRAY);
+
+            if (s_keyCooldown == 0 && g_phaseTimer > 20 && CheckHitKey(KEY_INPUT_RETURN)) {
+                s_keyCooldown = 20;
+                g_mode = MODE_VS_SCREEN;
+                g_phaseTimer = 0;
             }
             break;
         }
@@ -3417,58 +5050,49 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             DrawBox(440, 180, 520, 260, CHARA_PROFILES[CPU_ROSTER[curStage].charaIndex].baseColor, TRUE);
             DrawFormatString(390, 280, WHITE, "%s", CPU_ROSTER[curStage].name);
             DrawFormatString(390, 310, YELLOW, "%s", CPU_ROSTER[curStage].alias);
+            if (curStage == 1) DrawString(150, 380, "注意: 床に電流が流れる。予告の点滅を見て回避しよう", CYAN);
 
             if (g_phaseTimer > 120 || (CheckHitKey(KEY_INPUT_RETURN) && s_keyCooldown == 0 && g_phaseTimer > 20)) {
-                SetupBattleRound(false);
+                SetupBattleRound();
                 g_mode = MODE_BATTLE_PLAY;
             }
             break;
         }
 
         case MODE_BATTLE_PLAY: {
-            if (g_readyFightTimer < 80) {
-                g_readyFightTimer++;
-                if (g_readyFightTimer == 50) TriggerScreenShake(8);
-            }
-            else {
-                g_battleTimerFrames++;
-                if (g_battleTimerFrames >= 60) {
-                    g_battleTimerFrames = 0;
-                    if (g_roundTime > 0) g_roundTime--;
-                }
-            }
+            HandleCommandListKeys(g_me.charaIndex, false, true);
 
-            UpdatePlayer();
-            UpdateCpu();
-            UpdateTraps();
-            UpdateStageGimmick(curStage);
-            UpdateShotsAndFX();
-
-            int oy = g_shakeOffsetY;
-
-            // ==========================================
-            // 黒閃・空間反転ストロボ演出（画面全体が漆黒と真紅に反転）
-            // ==========================================
-            if (g_kokusenStrobe > 0) {
-                if (g_kokusenStrobe % 4 < 2) {
-                    DrawBox(0, 0, 640, 480, GetColor(0, 0, 0), TRUE); // 漆黒
+            if (!g_cmdListOpen) {
+                if (g_readyFightTimer < 80) {
+                    g_readyFightTimer++;
+                    if (g_readyFightTimer == 50) TriggerScreenShake(8);
                 }
                 else {
-                    DrawBox(0, 0, 640, 480, GetColor(180, 10, 10), TRUE); // 真紅
+                    g_battleTimerFrames++;
+                    if (g_battleTimerFrames >= 60) {
+                        g_battleTimerFrames = 0;
+                        if (g_roundTime > 0) g_roundTime--;
+                    }
                 }
-                DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, GetColor(10, 10, 10), TRUE);
-                DrawLine(0, (int)GROUND_Y + 25 + oy, 640, (int)GROUND_Y + 25 + oy, RED);
-            }
-            else {
-                DrawBox(0, 0, 640, 480, STAGES[curStage].skyColor, TRUE);
-                DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, STAGES[curStage].groundColor, TRUE);
-                DrawLine(0, (int)GROUND_Y + 25 + oy, 640, (int)GROUND_Y + 25 + oy, WHITE);
+
+                UpdateControlledFighter(g_me, g_other, g_ctrl[0], ReadLocalBits());
+                UpdateCpu();
+                UpdateTraps();
+                UpdateStageGimmick(curStage);
+                UpdateShots();
+                UpdateEffects();
             }
 
+            DrawStageBackground(curStage);
             DrawGimmick(curStage);
             DrawFighterObj(g_me, true);
             DrawFighterObj(g_other, false);
-            DrawHud(false);
+            DrawHud(HUD_STORY);
+
+            if (g_cmdListOpen) {
+                DrawCommandList(false);
+                break;
+            }
 
             if (g_me.hp <= 0 || g_other.hp <= 0) {
                 g_roundWon = (g_me.hp > 0);
@@ -3504,15 +5128,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         case MODE_TIME_OVER: {
             g_phaseTimer++;
-            UpdateShotsAndFX();
-            int oy = g_shakeOffsetY;
+            UpdateEffects();
 
-            DrawBox(0, 0, 640, 480, STAGES[curStage].skyColor, TRUE);
-            DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, STAGES[curStage].groundColor, TRUE);
+            DrawStageBackground(curStage);
             DrawGimmick(curStage);
             DrawFighterObj(g_me, true);
             DrawFighterObj(g_other, false);
-            DrawHud(false);
+            DrawHud(HUD_STORY);
 
             DrawBox(160, 180, 480, 260, GetColor(0, 0, 0), TRUE);
             DrawBox(160, 180, 480, 260, (g_roundWon ? YELLOW : RED), FALSE);
@@ -3538,7 +5160,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                            // ==========================================
         case MODE_KO_DISPLAY: {
             g_phaseTimer++;
-            UpdateShotsAndFX();
+            UpdateEffects();
             int oy = g_shakeOffsetY;
 
             if (g_isKokusenKoFinish) {
@@ -3555,7 +5177,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             DrawGimmick(curStage);
             DrawFighterObj(g_me, true);
             DrawFighterObj(g_other, false);
-            DrawHud(false);
+            DrawHud(HUD_STORY);
 
             if (g_isKokusenKoFinish) {
                 // パチンコ風・極限神撃K.O.特大フィニッシュ枠
@@ -3595,20 +5217,26 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             int prevStage = ClampI(s.stageProgress - 1, 0, LAST_STAGE);
             bool secretNext = (s.stageProgress == LAST_STAGE && !s.hasContinued && !s.hadTimeOver);
 
-            DrawString(220, 80, "=== VICTORY! ===", YELLOW);
-            DrawFormatString(120, 160, WHITE, "敗者 %s: 「%s」", CPU_ROSTER[prevStage].name, CPU_ROSTER[prevStage].winQuote);
+            DrawString(220, 60, "=== VICTORY! ===", YELLOW);
+            DrawFormatString(60, 110, WHITE, "敗者 %s: 「%s」", CPU_ROSTER[prevStage].name, CPU_ROSTER[prevStage].winQuote);
 
             float winRate = 0.0f;
             if (s.totalFights > 0) {
                 winRate = ((float)s.wins / (float)s.totalFights) * 100.0f;
             }
-            DrawFormatString(120, 220, CYAN, "通算戦績: %d戦 %d勝 %d敗 %d分 (勝率: %.1f%%)",
+            DrawFormatString(60, 150, CYAN, "通算戦績: %d戦 %d勝 %d敗 %d分 (勝率: %.1f%%)",
                 s.totalFights, s.wins, s.losses, s.draws, winRate);
-            if (secretNext) DrawString(120, 255, "……ただならぬ気配！ 何者かが乱入してくる！", RED);
-            else if (s.stageProgress >= LAST_STAGE) DrawString(120, 255, "全ての強敵を打ち倒した！", GREEN);
-            else DrawString(120, 255, "次の戦場へ向かう……", GREEN);
 
-            DrawString(180, 360, "[Enter]: 次へ進む", WHITE);
+            DrawBox(50, 185, 590, 265, GetColor(20, 24, 38), TRUE);
+            DrawBox(50, 185, 590, 265, GRAY, FALSE);
+            DrawString(60, 190, "この試合の記録", ORANGE);
+            DrawStatsBlock(60, 210, 0, g_me.charaIndex, WHITE);
+
+            if (secretNext) DrawString(60, 290, "……ただならぬ気配！ 何者かが乱入してくる！", RED);
+            else if (s.stageProgress >= LAST_STAGE) DrawString(60, 290, "全ての強敵を打ち倒した！", GREEN);
+            else DrawString(60, 290, "次の戦場へ向かう……", GREEN);
+
+            DrawString(180, 380, "[Enter]: 次へ進む", WHITE);
 
             if (CheckHitKey(KEY_INPUT_RETURN) && g_phaseTimer > 40 && s_keyCooldown == 0) {
                 s_keyCooldown = 20;
@@ -3636,11 +5264,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         case MODE_GAME_OVER: {
             DrawBox(0, 0, 640, 480, GetColor(10, 0, 0), TRUE);
-            DrawString(240, 140, "=== DEFEAT... ===", RED);
-            DrawString(220, 200, "CONTINUE CHALLENGE?", WHITE);
+            DrawString(240, 100, "=== DEFEAT... ===", RED);
+            DrawString(220, 150, "CONTINUE CHALLENGE?", WHITE);
 
-            DrawString(200, 290, "[Enter]: このステージから再挑戦", GREEN);
-            DrawString(200, 330, "[Esc]: スロット選択画面へ戻る", GRAY);
+            DrawBox(50, 190, 590, 270, GetColor(25, 10, 10), TRUE);
+            DrawBox(50, 190, 590, 270, GRAY, FALSE);
+            DrawString(60, 195, "この試合の記録", ORANGE);
+            DrawStatsBlock(60, 215, 0, g_me.charaIndex, WHITE);
+
+            DrawString(200, 310, "[Enter]: このステージから再挑戦", GREEN);
+            DrawString(200, 340, "[Esc]: スロット選択画面へ戻る", GRAY);
+            DrawString(130, 390, "ヒント: タイトルの TRAINING で技やコンボを練習できます", GRAY);
 
             if (s_keyCooldown == 0) {
                 if (CheckHitKey(KEY_INPUT_RETURN)) {
@@ -3666,32 +5300,40 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
             if (g_endingSecret) {
                 unsigned int cc = ((g_phaseTimer / 6) % 2) ? YELLOW : ORANGE;
-                DrawExtendString(236, 36, 3.0, 3.0, "CLEAR!!", cc);
-                DrawString(150, 105, "【伝説達成】裏ボス・真 天輪太子を撃破した！", RED);
+                DrawExtendString(236, 20, 3.0, 3.0, "CLEAR!!", cc);
+                DrawString(150, 76, "【伝説達成】裏ボス・真 天輪太子を撃破した！", RED);
             }
             else {
-                DrawExtendString(184, 44, 2.0, 2.0, "FINAL STAGE CLEAR", YELLOW);
-                DrawString(90, 105, "※ノーコンティニュー＆タイムオーバー無しで… 何かが現れる？", GRAY);
+                DrawExtendString(184, 24, 2.0, 2.0, "FINAL STAGE CLEAR", YELLOW);
+                DrawString(90, 76, "※ノーコンティニュー＆タイムオーバー無しで… 何かが現れる？", GRAY);
             }
 
-            DrawFormatString(150, 145, WHITE, "使用キャラ: %s", CHARA_PROFILES[c].charaId);
-            DrawFormatString(150, 172, YELLOW, "称号『%s』を獲得！", CHARA_TITLES[c][g_endingRank - 1]);
+            // 専用エンディング
+            DrawBox(40, 100, 600, 220, GetColor(10, 12, 24), TRUE);
+            DrawBox(40, 100, 600, 220, GRAY, FALSE);
+            DrawFormatString(52, 104, ORANGE, "- %s ENDING -", CHARA_PROFILES[c].charaId);
+            for (int i = 0; i < 3; i++) {
+                if (g_phaseTimer > 30 + i * 50) DrawString(52, 128 + i * 22, STORY_ENDING[c][i], WHITE);
+            }
+            if (g_endingSecret && g_phaseTimer > 180) DrawString(52, 196, STORY_ENDING_SECRET[c], YELLOW);
+
+            DrawFormatString(60, 232, YELLOW, "称号『%s』を獲得！", CHARA_TITLES[c][g_endingRank - 1]);
 
             float winRate = 0.0f;
             if (s.totalFights > 0) {
                 winRate = ((float)s.wins / (float)s.totalFights) * 100.0f;
             }
-            DrawFormatString(150, 205, CYAN, "最終戦績: %d戦 %d勝 %d敗 %d分 (勝率: %.1f%%)",
+            DrawFormatString(60, 256, CYAN, "最終戦績: %d戦 %d勝 %d敗 %d分 (勝率: %.1f%%)",
                 s.totalFights, s.wins, s.losses, s.draws, winRate);
-            DrawFormatString(150, 240, ORANGE, "次は %d周目：敵の攻撃力・AIが強化されます (難易度+%d)", GetCurrentLap(), GetHardLevel());
+            DrawFormatString(60, 280, ORANGE, "次は %d周目：敵の攻撃力・AIが強化されます (難易度+%d)", GetCurrentLap(), GetHardLevel());
 
             if (g_endingUnlockChara >= 0 && (g_phaseTimer / 10) % 3 != 0) {
-                DrawFormatString(110, 280, CYAN, "NEW CHALLENGER!! 次の周回から『%s』が使用可能に！",
+                DrawFormatString(60, 312, CYAN, "NEW CHALLENGER!! 次の周回から『%s』が使用可能に！",
                     CHARA_PROFILES[g_endingUnlockChara].charaId);
             }
 
-            DrawString(170, 370, "[Enter]: キャラクター選択へ (周回プレイ)", WHITE);
-            DrawString(170, 395, "[Esc]: タイトルへ戻る", GRAY);
+            DrawString(170, 380, "[Enter]: キャラクター選択へ (周回プレイ)", WHITE);
+            DrawString(170, 405, "[Esc]: タイトルへ戻る", GRAY);
 
             if (s_keyCooldown == 0 && g_phaseTimer > 60) {
                 if (CheckHitKey(KEY_INPUT_RETURN)) {
@@ -3707,6 +5349,90 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         }
 
                         // ==========================================
+                        // TRAINING
+                        // ==========================================
+        case MODE_TRAINING_SELECT: {
+            DrawBox(0, 0, 640, 480, GetColor(8, 14, 20), TRUE);
+            DrawString(230, 30, "=== TRAINING MODE ===", YELLOW);
+            DrawString(130, 56, "反撃してこないサンドバッグ相手に自由に練習できます", GRAY);
+
+            int myPos = 0, dmPos = 0;
+            for (int i = 0; i < trainCharaCount; i++) if (trainCharaList[i] == g_trainMyChara) myPos = i;
+            for (int i = 0; i < dummyCharaCount; i++) if (dummyCharaList[i] == g_trainDummyChara) dmPos = i;
+            g_trainMyChara = trainCharaList[myPos];
+            g_trainDummyChara = dummyCharaList[dmPos];
+
+            const char* rowName[4] = { "自分のキャラ", "ダミーのキャラ", "ステージ", "トレーニング開始" };
+            for (int r = 0; r < 4; r++) {
+                int y = 110 + r * 60;
+                bool sel = (g_trainRow == r);
+                DrawBox(80, y, 560, y + 46, sel ? GetColor(40, 40, 20) : GetColor(20, 24, 34), TRUE);
+                DrawBox(80, y, 560, y + 46, sel ? YELLOW : GRAY, FALSE);
+                DrawString(96, y + 14, rowName[r], sel ? YELLOW : WHITE);
+                if (r == 0) DrawFormatString(260, y + 14, WHITE, "< %s >", CHARA_PROFILES[g_trainMyChara].charaId);
+                if (r == 1) DrawFormatString(260, y + 14, WHITE, "< %s >", CHARA_PROFILES[g_trainDummyChara].charaId);
+                if (r == 2) DrawFormatString(260, y + 14, WHITE, "< %s >", STAGES[g_trainStage].name);
+            }
+            DrawString(70, 360, "※未解放キャラは、どれかのセーブデータで解放すると使えます", GRAY);
+            DrawString(70, 400, "[W/S]: 項目  [A/D]: 変更  [ENTER]: 開始  [TAB]: 技表  [ESC]: 戻る", WHITE);
+
+            HandleCommandListKeys(g_trainMyChara, true, true);
+            if (g_cmdListOpen) {
+                DrawCommandList(true);
+                break;
+            }
+
+            if (s_keyCooldown == 0) {
+                if (CheckHitKey(KEY_INPUT_W) || CheckHitKey(KEY_INPUT_UP)) { g_trainRow = (g_trainRow + 3) % 4; s_keyCooldown = 12; }
+                if (CheckHitKey(KEY_INPUT_S) || CheckHitKey(KEY_INPUT_DOWN)) { g_trainRow = (g_trainRow + 1) % 4; s_keyCooldown = 12; }
+                int delta = 0;
+                if (CheckHitKey(KEY_INPUT_A) || CheckHitKey(KEY_INPUT_LEFT)) delta = -1;
+                if (CheckHitKey(KEY_INPUT_D) || CheckHitKey(KEY_INPUT_RIGHT)) delta = 1;
+                if (delta != 0) {
+                    s_keyCooldown = 12;
+                    if (g_trainRow == 0) g_trainMyChara = trainCharaList[(myPos + delta + trainCharaCount) % trainCharaCount];
+                    if (g_trainRow == 1) g_trainDummyChara = dummyCharaList[(dmPos + delta + dummyCharaCount) % dummyCharaCount];
+                    if (g_trainRow == 2) g_trainStage = (g_trainStage + delta + 6) % 6;
+                }
+                if (CheckHitKey(KEY_INPUT_RETURN)) {
+                    s_keyCooldown = 15;
+                    SetupTraining();
+                    g_mode = MODE_TRAINING;
+                }
+                if (CheckHitKey(KEY_INPUT_ESCAPE)) {
+                    s_keyCooldown = 15;
+                    g_mode = MODE_TITLE;
+                }
+            }
+            break;
+        }
+
+        case MODE_TRAINING: {
+            HandleCommandListKeys(g_me.charaIndex, true, true);
+            if (!g_cmdListOpen) {
+                HandleTrainingKeys();
+                UpdateTrainingFrame();
+            }
+
+            DrawStageBackground(g_currentStageIdx);
+            DrawGimmick(g_currentStageIdx);
+            DrawFighterObj(g_me, true);
+            DrawFighterObj(g_other, false);
+            if (g_showHitbox) DrawHitboxes();
+            DrawHud(HUD_TRAINING);
+            DrawTrainingOverlay();
+
+            if (g_cmdListOpen) {
+                DrawCommandList(true);
+            }
+            else if (KeyHit(KEY_INPUT_ESCAPE)) {
+                s_keyCooldown = 15;
+                g_mode = MODE_TRAINING_SELECT;
+            }
+            break;
+        }
+
+                        // ==========================================
                         // LAN VERSUS
                         // ==========================================
         case MODE_NET_MENU: {
@@ -3714,6 +5440,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             DrawString(200, 80, "=== LAN VERSUS MENU ===", YELLOW);
             DrawString(210, 180, (g_netMenu == 0) ? "> HOST 作成 (部屋を開く)" : "  HOST 作成 (部屋を開く)", (g_netMenu == 0) ? YELLOW : WHITE);
             DrawString(210, 220, (g_netMenu == 1) ? "> CLIENT 参加 (IP接続)" : "  CLIENT 参加 (IP接続)", (g_netMenu == 1) ? YELLOW : WHITE);
+            DrawString(120, 300, "ホストが当たり判定・HP・乱数をすべて計算するため、", GRAY);
+            DrawString(120, 320, "遅延があっても両者の画面の結果は食い違いません", GRAY);
 
             DrawString(190, 380, "[W/S]: 選択   [ENTER]: 決定   [ESC]: 戻る", GRAY);
 
@@ -3726,6 +5454,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                     else g_mode = MODE_CLIENT_INPUT;
                 }
                 if (CheckHitKey(KEY_INPUT_ESCAPE)) {
+                    g_is_net_battle = false;
                     g_mode = MODE_TITLE;
                     s_keyCooldown = 15;
                 }
@@ -3775,46 +5504,77 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         case MODE_NET_STAGE_SELECT: {
             ReceivePackets();
+            if (g_mode != MODE_NET_STAGE_SELECT) break;
+            static const int timeOptions[3] = { 60, 99, 0 };
             DrawBox(0, 0, 640, 480, GetColor(10, 8, 20), TRUE);
-            DrawString(240, 20, "STAGE SELECT", PURPLE);
+            DrawString(220, 20, "STAGE & RULE SELECT", PURPLE);
 
-            DrawBox(40, 50, 600, 240, STAGES[g_selectedNetStage].skyColor, TRUE);
-            DrawBox(40, 50, 600, 240, WHITE, FALSE);
-            DrawFormatString(60, 80, YELLOW, "%s", STAGES[g_selectedNetStage].name);
+            DrawBox(40, 50, 600, 190, STAGES[g_netRules.stage].skyColor, TRUE);
+            DrawBox(40, 50, 600, 190, WHITE, FALSE);
+            DrawFormatString(60, 80, YELLOW, "%s", STAGES[g_netRules.stage].name);
 
-            for (int i = 0; i < 5; i++) {
-                int bx = 45 + i * 110;
-                int by = 270;
-                DrawBox(bx, by, bx + 100, by + 80, STAGES[i].skyColor, TRUE);
-                DrawBox(bx, by, bx + 100, by + 80, (i == g_selectedNetStage) ? YELLOW : GRAY, FALSE);
-                DrawFormatString(bx + 8, by + 30, WHITE, "STAGE %d", i + 1);
+            const char* rowName[4] = { "ステージ", "勝利条件", "制限時間", "ギミック・アイテム" };
+            char rowVal[4][48];
+            sprintf_s(rowVal[0], "STAGE %d", g_netRules.stage + 1);
+            sprintf_s(rowVal[1], "%d本先取", g_netRules.roundsToWin);
+            if (g_netRules.timeLimit == 0) sprintf_s(rowVal[2], "無制限");
+            else sprintf_s(rowVal[2], "%d秒", g_netRules.timeLimit);
+            sprintf_s(rowVal[3], "%s", g_netRules.gimmickOn ? "あり" : "なし");
+            for (int r = 0; r < 4; r++) {
+                int y = 210 + r * 40;
+                bool sel = g_is_host && (g_netRuleRow == r);
+                DrawBox(80, y, 560, y + 32, sel ? GetColor(40, 40, 20) : GetColor(20, 24, 34), TRUE);
+                DrawBox(80, y, 560, y + 32, sel ? YELLOW : GRAY, FALSE);
+                DrawString(96, y + 8, rowName[r], sel ? YELLOW : WHITE);
+                DrawFormatString(300, y + 8, WHITE, "< %s >", rowVal[r]);
             }
 
             if (g_is_host) {
-                DrawString(160, 400, "A / D: ステージ切り替え   Enter: 決定", WHITE);
+                DrawString(120, 400, "W/S: 項目  A/D: 変更  Enter: 決定してキャラ選択へ", WHITE);
                 if (s_keyCooldown == 0) {
-                    if (CheckHitKey(KEY_INPUT_A)) { g_selectedNetStage = (g_selectedNetStage + 4) % 5; s_keyCooldown = 12; }
-                    if (CheckHitKey(KEY_INPUT_D)) { g_selectedNetStage = (g_selectedNetStage + 1) % 5; s_keyCooldown = 12; }
+                    if (CheckHitKey(KEY_INPUT_W)) { g_netRuleRow = (g_netRuleRow + 3) % 4; s_keyCooldown = 12; }
+                    if (CheckHitKey(KEY_INPUT_S)) { g_netRuleRow = (g_netRuleRow + 1) % 4; s_keyCooldown = 12; }
+                    int delta = CheckHitKey(KEY_INPUT_A) ? -1 : (CheckHitKey(KEY_INPUT_D) ? 1 : 0);
+                    if (delta != 0) {
+                        s_keyCooldown = 12;
+                        if (g_netRuleRow == 0) g_netRules.stage = (unsigned char)((g_netRules.stage + delta + 5) % 5);
+                        if (g_netRuleRow == 1) g_netRules.roundsToWin = (unsigned char)((g_netRules.roundsToWin - 1 + delta + 3) % 3 + 1);
+                        if (g_netRuleRow == 2) {
+                            int idx = 0;
+                            for (int i = 0; i < 3; i++) if (timeOptions[i] == g_netRules.timeLimit) idx = i;
+                            g_netRules.timeLimit = (unsigned char)timeOptions[(idx + delta + 3) % 3];
+                        }
+                        if (g_netRuleRow == 3) g_netRules.gimmickOn = g_netRules.gimmickOn ? 0 : 1;
+                    }
                     if (CheckHitKey(KEY_INPUT_RETURN)) {
-                        SendFighterPacket(PKT_STAGE_SYNC, 0, 0, 0, 0, 0, 0, 0, g_selectedNetStage);
+                        g_myNetReady = false;
+                        g_enemyNetReady = false;
+                        SendPacket(PKT_SETUP, &g_netRules, sizeof(g_netRules));
                         g_mode = MODE_NET_CHARA_SELECT;
                         s_keyCooldown = 15;
                     }
                 }
             }
             else {
-                DrawString(200, 400, "ホストがステージを選んでいます...", YELLOW);
+                DrawString(200, 400, "ホストがステージとルールを選んでいます...", YELLOW);
+            }
+            if (CheckHitKey(KEY_INPUT_ESCAPE)) {
+                CloseSocket(g_peer);
+                g_is_net_battle = false;
+                g_mode = MODE_TITLE;
+                s_keyCooldown = 15;
             }
             break;
         }
 
         case MODE_NET_CHARA_SELECT: {
             ReceivePackets();
+            if (g_mode != MODE_NET_CHARA_SELECT) break;
             DrawBox(0, 0, 640, 480, GetColor(14, 16, 26), TRUE);
             DrawString(225, 18, "CHARACTER SELECT", YELLOW);
 
             g_netCharaCursor = ClampI(g_netCharaCursor, 0, netCharaCount - 1);
-            g_myNetChara = netCharaList[g_netCharaCursor];
+            if (!g_myNetReady) g_myNetChara = netCharaList[g_netCharaCursor];
 
             DrawBox(30, 45, 290, 275, GetColor(25, 30, 45), TRUE);
             DrawBox(30, 45, 290, 275, g_myNetReady ? GREEN : RED, FALSE);
@@ -3825,8 +5585,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             DrawBox(350, 45, 610, 275, GetColor(35, 20, 25), TRUE);
             DrawBox(350, 45, 610, 275, g_enemyNetReady ? GREEN : BLUE, FALSE);
             DrawString(365, 55, "2P: REMOTE", g_enemyNetReady ? GREEN : BLUE);
-            DrawBox(460, 100, 500, 160, CHARA_PROFILES[g_enemyNetChara].baseColor, TRUE);
-            DrawFormatString(365, 180, WHITE, "NAME: %s", CHARA_PROFILES[g_enemyNetChara].charaId);
+            if (g_enemyNetReady) {
+                DrawBox(460, 100, 500, 160, CHARA_PROFILES[g_enemyNetChara].baseColor, TRUE);
+                DrawFormatString(365, 180, WHITE, "NAME: %s", CHARA_PROFILES[g_enemyNetChara].charaId);
+            }
+            else {
+                DrawString(365, 180, "選択中...", GRAY);
+            }
 
             for (int i = 0; i < netCharaCount; i++) {
                 int cx = 22 + i * 100;
@@ -3838,15 +5603,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 DrawFormatString(cx + 4, cy + 60, WHITE, "%s", CHARA_PROFILES[c].charaId);
             }
 
-            if (!g_myNetReady) {
-                DrawString(160, 415, "A / D: キャラ選択   Enter: 決定", WHITE);
+            HandleCommandListKeys(g_myNetChara, false, true);
+            if (g_cmdListOpen) {
+                DrawCommandList(false);
+            }
+            else if (!g_myNetReady) {
+                DrawString(120, 415, "A / D: キャラ選択   Enter: 決定   TAB: 技表", WHITE);
                 if (s_keyCooldown == 0) {
                     if (CheckHitKey(KEY_INPUT_A)) { g_netCharaCursor = (g_netCharaCursor + netCharaCount - 1) % netCharaCount; s_keyCooldown = 12; }
                     if (CheckHitKey(KEY_INPUT_D)) { g_netCharaCursor = (g_netCharaCursor + 1) % netCharaCount; s_keyCooldown = 12; }
                     if (CheckHitKey(KEY_INPUT_RETURN)) {
                         g_myNetChara = netCharaList[g_netCharaCursor];
                         g_myNetReady = true;
-                        SendFighterPacket(PKT_CHARA_SYNC, 0, 0, 0, 0, 0, 0, 0, g_myNetChara);
+                        NetCharaMsg msg = { (unsigned char)g_myNetChara };
+                        SendPacket(PKT_CHARA, &msg, sizeof(msg));
                         s_keyCooldown = 15;
                     }
                 }
@@ -3855,63 +5625,43 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 DrawString(200, 415, "相手の決定を待機中...", YELLOW);
             }
 
+            // WaitTimer を使わず、そのまま試合へ（READY演出はフレームで進む）
             if (g_myNetReady && g_enemyNetReady) {
-                SetupBattleRound(true);
-                WaitTimer(300);
+                g_cmdListOpen = false;
+                SetupNetMatch();
                 g_mode = MODE_NET_BATTLE_PLAY;
             }
             break;
         }
 
         case MODE_NET_BATTLE_PLAY: {
-            if (g_readyFightTimer < 80) {
-                g_readyFightTimer++;
-                if (g_readyFightTimer == 50) TriggerScreenShake(8);
-            }
-            else {
-                g_battleTimerFrames++;
-                if (g_battleTimerFrames >= 60) {
-                    g_battleTimerFrames = 0;
-                    if (g_roundTime > 0) g_roundTime--;
-                }
-            }
-
-            UpdatePlayer();
-            UpdateTraps();
-            UpdateShotsAndFX();
-
+            HandleCommandListKeys(g_me.charaIndex, false, false);
             if (g_is_host) {
-                SendFighterPacket(PKT_STATE, g_me.x, g_me.y, g_me.vx, g_me.vy, g_me.hp, (int)g_me.state, g_me.dir, 0);
+                ReceivePackets();
+                if (g_mode != MODE_NET_BATTLE_PLAY) break;
+                NetHostUpdate();
             }
             else {
-                SendFighterPacket(PKT_INPUT, g_me.x, g_me.y, g_me.vx, g_me.vy, g_me.hp, (int)g_me.state, g_me.dir, 0);
+                NetClientUpdate();
             }
-            ReceivePackets();
+            FlushSend();
+            if (g_mode == MODE_NET_ERROR) break;
 
-            int oy = g_shakeOffsetY;
-
-            if (g_kokusenStrobe > 0) {
-                if (g_kokusenStrobe % 4 < 2) DrawBox(0, 0, 640, 480, GetColor(0, 0, 0), TRUE);
-                else DrawBox(0, 0, 640, 480, GetColor(180, 10, 10), TRUE);
-                DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, GetColor(10, 10, 10), TRUE);
-            }
-            else {
-                DrawBox(0, 0, 640, 480, STAGES[g_selectedNetStage].skyColor, TRUE);
-                DrawBox(0, (int)GROUND_Y + 25 + oy, 640, 480, STAGES[g_selectedNetStage].groundColor, TRUE);
-                DrawLine(0, (int)GROUND_Y + 25 + oy, 640, (int)GROUND_Y + 25 + oy, WHITE);
-            }
-
-            DrawGimmick(g_selectedNetStage);
+            DrawStageBackground(g_currentStageIdx);
+            DrawGimmick(g_currentStageIdx);
             DrawFighterObj(g_me, true);
             DrawFighterObj(g_other, false);
-            DrawHud(true);
-
-            if (g_me.hp <= 0 || g_other.hp <= 0) {
-                g_roundWon = (g_me.hp > 0);
-                g_mode = MODE_NET_RESULT;
+            DrawHud(HUD_NET);
+            DrawNetPhaseBanner();
+            if (!g_is_host && !g_netGotSnapshot) {
+                DrawBox(200, 300, 440, 330, BLACK, TRUE);
+                DrawString(230, 307, "ホストと同期中...", YELLOW);
             }
-            if (CheckHitKey(KEY_INPUT_ESCAPE)) {
+            if (g_cmdListOpen) DrawCommandList(false);
+
+            if (KeyHit(KEY_INPUT_ESCAPE)) {
                 CloseSocket(g_peer);
+                g_is_net_battle = false;
                 g_mode = MODE_TITLE;
                 s_keyCooldown = 15;
             }
@@ -3920,25 +5670,43 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         case MODE_NET_RESULT: {
             DrawBox(0, 0, 640, 480, GetColor(10, 10, 15), TRUE);
-            if (g_roundWon) {
-                DrawString(240, 160, "=== YOU WIN! ===", YELLOW);
+            if (g_netWinner == 3) {
+                DrawString(250, 40, "=== DRAW GAME ===", GRAY);
+            }
+            else if (g_roundWon) {
+                DrawString(240, 40, "=== YOU WIN! ===", YELLOW);
             }
             else {
-                DrawString(240, 160, "=== YOU LOSE... ===", RED);
+                DrawString(240, 40, "=== YOU LOSE... ===", RED);
             }
-            DrawString(190, 310, "[Enter] 再戦 (ステージ選択へ)", GREEN);
-            DrawString(190, 350, "[ESC] メニューへ戻る", GRAY);
+            int myIdx = g_is_host ? 0 : 1;
+            DrawFormatString(250, 70, WHITE, "ラウンド  %d - %d", g_netRounds[myIdx], g_netRounds[1 - myIdx]);
 
-            if (CheckHitKey(KEY_INPUT_RETURN)) {
+            DrawBox(30, 100, 610, 190, GetColor(20, 24, 38), TRUE);
+            DrawBox(30, 100, 610, 190, CYAN, FALSE);
+            DrawFormatString(40, 106, CYAN, "YOU: %s", CHARA_PROFILES[g_me.charaIndex].charaId);
+            DrawStatsBlock(40, 126, 0, g_me.charaIndex, WHITE);
+
+            DrawBox(30, 200, 610, 290, GetColor(38, 20, 24), TRUE);
+            DrawBox(30, 200, 610, 290, RED, FALSE);
+            DrawFormatString(40, 206, RED, "REMOTE: %s", CHARA_PROFILES[g_other.charaIndex].charaId);
+            DrawStatsBlock(40, 226, 1, g_other.charaIndex, WHITE);
+
+            DrawString(190, 330, "[Enter] 再戦 (ステージ選択へ)", GREEN);
+            DrawString(190, 360, "[ESC] メニューへ戻る", GRAY);
+
+            if (s_keyCooldown == 0 && CheckHitKey(KEY_INPUT_RETURN)) {
                 g_myNetReady = false;
                 g_enemyNetReady = false;
+                g_netRuleRow = 0;
                 g_mode = MODE_NET_STAGE_SELECT;
                 s_keyCooldown = 15;
             }
-            if (CheckHitKey(KEY_INPUT_ESCAPE)) {
+            if (s_keyCooldown == 0 && CheckHitKey(KEY_INPUT_ESCAPE)) {
                 CloseSocket(g_peer);
+                g_is_net_battle = false;
                 g_mode = MODE_TITLE;
-                WaitTimer(200);
+                s_keyCooldown = 15;
             }
             break;
         }
@@ -3949,6 +5717,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             DrawString(100, 220, g_net_status, WHITE);
             DrawString(100, 280, "[ESC] タイトルへ戻る", GRAY);
             if (CheckHitKey(KEY_INPUT_ESCAPE)) {
+                g_is_net_battle = false;
                 g_mode = MODE_TITLE;
                 s_keyCooldown = 15;
             }
