@@ -26,10 +26,12 @@ static const unsigned int MAGIC = 0x4455454C;
 static const float GROUND_Y = 380.0f;
 static const float GRAVITY = 0.65f;
 static const unsigned int SAVE_VERSION = 20261103;
-static const int VIS_OFF_Y = -25;   // 当たり判定の論理座標 → 画面上のキャラ絵の位置へのずれ
+static const int VIS_OFF_Y = 3;     // 当たり判定の論理座標 → 画面上のキャラ絵の中心へのずれ
+static const int FLOOR_DRAW_OFF = 25; // f.y（論理の足元）から画面の床の線までの距離
 
 enum GameMode {
     MODE_TITLE,
+    MODE_TUTORIAL,
     MODE_SLOT_SELECT,
     MODE_CHARA_SELECT,
     MODE_STORY_INTRO,
@@ -85,6 +87,20 @@ enum InputBit {
     IN_LEFT = 1, IN_RIGHT = 2, IN_UP = 4, IN_DOWN = 8,
     IN_J = 16, IN_K = 32, IN_L = 64, IN_SPACE = 128, IN_DODGE = 256
 };
+
+// チュートリアルへ「プレイヤーが何をしたか」を知らせるイベント
+enum TutEvent {
+    TE_HIT,          // param = 当てた技の状態 or コンボタグ
+    TE_GUARD,
+    TE_PARRY,
+    TE_DASH,         // param = 移動方向
+    TE_DODGE,
+    TE_JUMP,
+    TE_DOUBLE_JUMP,
+    TE_FAST_FALL,
+    TE_BURST
+};
+static void TutorialEvent(int ev, int param);
 
 struct FrameData {
     int startup;
@@ -553,10 +569,18 @@ struct Fighter {
     int trapCycle;
     int guardStun;         // ガード硬直
     bool crouching;        // しゃがみ（トレーニングのダミー用）
+    float pendingRiseVy;   // 昇天脚など：発生フレームを迎えてから跳び上がる
 };
 
 static Fighter g_me;
 static Fighter g_other;
+
+// 立ち状態（ACT_IDLE）のキャラ画像。読み込めなければ -1 で、図形描画に切り替える
+static int g_charaGraph[CHARA_COUNT];
+static const char* CHARA_IMAGE_FILES[CHARA_COUNT] = {
+    "rikidou.bmp", "wanataro.bmp", "ananda.bmp", "inoshishi.bmp", "omae.bmp",
+    "mama.bmp", "boss.bmp", "yoshida.bmp", "takeshi.bmp"
+};
 
 // 試合後の統計（0 = 自分 / 1 = 相手）
 struct MatchStats {
@@ -1006,6 +1030,40 @@ static void InitMasterData() {
     STAGES[5] = { "EX STAGE: 天下一武道会・裏本殿",      GetColor(10, 20, 50), GetColor(40, 30, 60), "天輪の大神柱",   5 };
 }
 
+// 画像は実行フォルダ（Debug）に置く。プロジェクトフォルダから起動した場合に備えて Debug\ も探す。
+// .bmp が無ければ同名の .png も試す（例: 既存の boss.png）
+static int TryLoadGraph(const char* name) {
+    const char* dirs[2] = { "", "Debug\\" };
+    for (int d = 0; d < 2; d++) {
+        char path[MAX_PATH];
+        sprintf_s(path, "%s%s", dirs[d], name);
+        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) continue;
+        int h = LoadGraph(path);
+        if (h != -1) return h;
+    }
+    return -1;
+}
+
+static void LoadCharaGraphs() {
+    for (int c = 0; c < CHARA_COUNT; c++) {
+        g_charaGraph[c] = TryLoadGraph(CHARA_IMAGE_FILES[c]);
+        if (g_charaGraph[c] == -1) {
+            char png[64];
+            strcpy_s(png, CHARA_IMAGE_FILES[c]);
+            char* dot = strrchr(png, '.');
+            if (dot) strcpy_s(dot, sizeof(png) - (dot - png), ".png");
+            g_charaGraph[c] = TryLoadGraph(png);
+        }
+    }
+}
+
+static void DeleteCharaGraphs() {
+    for (int c = 0; c < CHARA_COUNT; c++) {
+        if (g_charaGraph[c] != -1) DeleteGraph(g_charaGraph[c]);
+        g_charaGraph[c] = -1;
+    }
+}
+
 // ----------------------------------------------------
 // セーブデータ
 // ----------------------------------------------------
@@ -1099,7 +1157,7 @@ static int GetCurrentLap() {
 
 // 周回難易度（2周目で+1、最大+5）。ストーリー以外では0
 static int GetHardLevel() {
-    if (g_is_net_battle || g_mode == MODE_TRAINING || g_mode == MODE_TRAINING_SELECT) return 0;
+    if (g_is_net_battle || g_mode == MODE_TRAINING || g_mode == MODE_TRAINING_SELECT || g_mode == MODE_TUTORIAL) return 0;
     return ClampI(GetCurrentLap() - 1, 0, 5);
 }
 
@@ -1575,7 +1633,8 @@ static bool GetAttackBox(const Fighter& atk, float distToDef, AttackBox& b) {
                 b.w = 55; b.h = 32; b.offX = d * 40; b.offY = -10; b.damage = 55; b.kx = d * 3.2f; b.stun = 22;
             }
             else if (atk.state == ACT_SKILL_ATTACK) {
-                b.w = 60; b.h = 80; b.offX = d * 36; b.offY = -40; b.damage = 125; b.kx = d * 1.5f; b.ky = -17.5f; b.launcher = true; b.stun = 48;
+                // 足元から頭上までを縦長にカバー（対地・対空どちらにも当たる）
+                b.w = 64; b.h = 110; b.offX = d * 34; b.offY = -25; b.damage = 125; b.kx = d * 1.5f; b.ky = -17.5f; b.launcher = true; b.stun = 48;
             }
             else if (atk.state == ACT_AIR_KICK) {
                 b.w = 58; b.h = 50; b.offX = d * 32; b.offY = 22; b.damage = 135; b.kx = d * 4.0f; b.ky = 16.5f; b.smash = true; b.stun = 42;
@@ -1677,7 +1736,7 @@ static bool GetAttackBox(const Fighter& atk, float distToDef, AttackBox& b) {
                 b.w = 90; b.h = 40; b.offX = d * 60; b.offY = -12; b.damage = 100; b.kx = d * 9.0f; b.ky = -4.0f; b.smash = true; b.stun = 36;
             }
             else if (atk.state == ACT_SKILL_ATTACK) {
-                b.w = 60; b.h = 90; b.offX = d * 30; b.offY = -40; b.damage = 130; b.kx = d * 2.0f; b.ky = -18.0f; b.launcher = true; b.stun = 48;
+                b.w = 60; b.h = 110; b.offX = d * 30; b.offY = -25; b.damage = 130; b.kx = d * 2.0f; b.ky = -18.0f; b.launcher = true; b.stun = 48;
             }
             else if (atk.state == ACT_AIR_LIGHT) {
                 b.w = 60; b.h = 50; b.offX = d * 32; b.offY = 20; b.damage = 95; b.kx = d * 3.0f; b.ky = 15.0f; b.smash = true; b.stun = 36;
@@ -1753,6 +1812,7 @@ static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx,
             int gs = stun / 2 + 2;
             if (def.guardStun < gs) def.guardStun = gs;
             g_stats[di].guards++;
+            if (&def == &g_me) TutorialEvent(TE_GUARD, 0);
             SpawnHitFX(def.x + (float)def.dir * 16.0f, def.y - 15, BLUE, 6);
             SpawnSparks(def.x + (float)def.dir * 16.0f, def.y - 15, CYAN, 3, 18.0f);
             if (srcTag < 0) RecordAdvantage(atk, def, def.guardStun, true, false);
@@ -1788,6 +1848,7 @@ static void ApplyDamage(Fighter& def, Fighter& atk, int dmg, int stun, float kx,
     if (atk.comboCount > g_stats[ai].maxCombo) g_stats[ai].maxCombo = atk.comboCount;
     g_stats[di].taken++;
 
+    if (&atk == &g_me) TutorialEvent(TE_HIT, srcTag >= 0 ? srcTag : (int)atk.state);
     if (g_mode == MODE_TRAINING && &atk == &g_me) {
         g_comboDmg += dmg;
         g_comboHits++;
@@ -1911,6 +1972,7 @@ static void CheckAttackHit(Fighter& atk, Fighter& def) {
             g_stats[ai].hits++;
             g_stats[ai].damage += 95;
             g_stats[FighterIndex(def)].taken++;
+            if (&atk == &g_me) TutorialEvent(TE_HIT, ACT_THROW);
             if (g_mode == MODE_TRAINING && &atk == &g_me) {
                 g_comboDmg += 95;
                 g_comboHits++;
@@ -1953,7 +2015,10 @@ static void CheckAttackHit(Fighter& atk, Fighter& def) {
             def.isCounter = true;
             def.spGauge += master ? 40 : 20; if (def.spGauge > 100) def.spGauge = 100;
             g_stats[FighterIndex(def)].parries++;
-            if (&def == &g_me) LogComboTag(TAG_PARRY);
+            if (&def == &g_me) {
+                LogComboTag(TAG_PARRY);
+                TutorialEvent(TE_PARRY, 0);
+            }
             g_parryNoticeTimer = 35;
             TriggerScreenShake(master ? 12 : 6);
             SpawnHitFX(def.x, def.y - 15, CYAN, 25);
@@ -2184,6 +2249,7 @@ static void StartDash(Fighter& f, int moveDir) {
     if (back) f.invulFrames = 6;
     f.vx = (float)moveDir * CHARA_PROFILES[f.charaIndex].dashSpeed;
     SpawnHitFX(f.x - (float)moveDir * 12.0f, f.y + 15, GRAY, 5);
+    if (&f == &g_me) TutorialEvent(TE_DASH, moveDir);
 }
 
 static void StartDodge(Fighter& f, int moveDir) {
@@ -2195,6 +2261,7 @@ static void StartDodge(Fighter& f, int moveDir) {
     f.invulFrames = 15;
     f.vx = (float)moveDir * 7.5f;
     SpawnHitFX(f.x, f.y + 10, WHITE, 6);
+    if (&f == &g_me) TutorialEvent(TE_DODGE, moveDir);
 }
 
 // コンボ抜け（バースト）：被弾中にSP50を払って相手を弾き飛ばす
@@ -2228,6 +2295,7 @@ static bool TryBurst(Fighter& f, Fighter& opp) {
     SpawnHitFX(f.x, f.y - 20, WHITE, 20);
     SpawnSparks(f.x, f.y - 20, CYAN, 16, 60.0f);
     SpawnPopup(f.x, f.y - 90, "BURST!! コンボ抜け", CYAN);
+    if (&f == &g_me) TutorialEvent(TE_BURST, 0);
     return true;
 }
 
@@ -2251,6 +2319,7 @@ static bool StartAttackInner(Fighter& f, Fighter& opp, int btn) {
     if (btn == 1 && !f.isGrounded) return false;
     if (btn == 2 && !f.isGrounded && c == 8) return false;
 
+    f.pendingRiseVy = 0.0f;
     f.hasHit = false;
     f.animTimer = 0;
     f.whiffChecked = false;
@@ -2317,10 +2386,9 @@ static bool StartAttackInner(Fighter& f, Fighter& opp, int btn) {
         f.stateTimer = 34;
         switch (c) {
         case 0:
-            f.vx = (float)f.dir * 3.5f;
-            f.vy = -16.5f;
-            f.isGrounded = false;
-            TriggerScreenShake(6);
+            // 昇天脚：踏み込んでから、攻撃判定が出る瞬間に跳び上がる（地上の相手にも当たる）
+            f.vx = (float)f.dir * 2.0f;
+            f.pendingRiseVy = -16.5f;
             break;
         case 1: // 罠を放り投げる（当たれば小ダメージ、外れても着地点に設置）
             FighterShot(f, f.x + f.dir * 20, f.y - 30, f.dir * 6.5f, -7.5f, 40, ORANGE, 10, 4, f.trapCycle);
@@ -2335,11 +2403,10 @@ static bool StartAttackInner(Fighter& f, Fighter& opp, int btn) {
         case 4:
             f.vx = 0;
             break;
-        case 7: // サマーソルト
+        case 7: // サマーソルト（昇天脚と同じく発生してから跳ぶ）
             f.stateTimer = 30;
             f.vx = (float)f.dir * 2.5f;
-            f.vy = -13.0f;
-            f.isGrounded = false;
+            f.pendingRiseVy = -13.0f;
             break;
         case 8: // 挑発
             f.state = ACT_TAUNT;
@@ -2487,6 +2554,15 @@ static void UpdateStateSpecials(Fighter& f, Fighter& opp) {
                 SpawnPopup(f.x, f.y - 95, "スカッ…（大スキ!!）", GRAY);
             }
         }
+    }
+
+    // 発生フレームで跳び上がる（このフレームの当たり判定はまだ地上の位置で行われる）
+    if (f.state == ACT_SKILL_ATTACK && f.pendingRiseVy != 0.0f &&
+        f.animTimer >= GetFrameData(c, ACT_SKILL_ATTACK).startup) {
+        f.vy = f.pendingRiseVy;
+        f.isGrounded = false;
+        f.pendingRiseVy = 0.0f;
+        if (c == 0) TriggerScreenShake(6);
     }
 
     // 多段ヒットの超必殺
@@ -2647,10 +2723,12 @@ static void UpdateControlledFighter(Fighter& f, Fighter& opp, ControlState& cs, 
             f.vy = CHARA_PROFILES[c].jumpPower * 0.85f;
             f.doubleJumpUsed = true;
             SpawnHitFX(f.x, f.y + 10, WHITE, 8);
+            if (&f == &g_me) TutorialEvent(TE_DOUBLE_JUMP, 0);
         }
         if (cs.dbl & IN_DOWN) {
             f.vy = 17.0f;
             SpawnHitFX(f.x, f.y - 30, WHITE, 6);
+            if (&f == &g_me) TutorialEvent(TE_FAST_FALL, 0);
         }
         if (f.state == ACT_IDLE && !f.airDashUsed && (cs.dbl & (IN_LEFT | IN_RIGHT))) {
             int md = (cs.dbl & IN_LEFT) ? -1 : 1;
@@ -2700,6 +2778,7 @@ static void UpdateControlledFighter(Fighter& f, Fighter& opp, ControlState& cs, 
             f.vy = CHARA_PROFILES[c].jumpPower;
             f.isGrounded = false;
             if (dashing) { f.state = ACT_IDLE; f.stateTimer = 0; f.animTimer = 0; }
+            if (&f == &g_me) TutorialEvent(TE_JUMP, 0);
         }
 
         int jCost = (c == 3) ? 20 : 8;
@@ -3048,7 +3127,10 @@ static void UpdateShots() {
                 g_shots[i].isFromMe = !g_shots[i].isFromMe;
                 def.spGauge += 20; if (def.spGauge > 100) def.spGauge = 100;
                 g_stats[FighterIndex(def)].parries++;
-                if (&def == &g_me) LogComboTag(def.state == ACT_PARRY ? TAG_PARRY : TAG_COUNTER_SUPER);
+                if (&def == &g_me) {
+                    LogComboTag(def.state == ACT_PARRY ? TAG_PARRY : TAG_COUNTER_SUPER);
+                    if (def.state == ACT_PARRY) TutorialEvent(TE_PARRY, 0);
+                }
                 SpawnHitFX(def.x, def.y - 15, CYAN, 20);
                 SpawnSparks(def.x, def.y - 15, CYAN, 10, 35.0f);
                 if (def.state == ACT_COUNTER_STANCE) SpawnPopup(def.x, def.y - 90, "見切り!", CYAN);
@@ -3277,24 +3359,34 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
     if (f.state == ACT_COUNTER_STRIKE) col = WHITE;
 
     int bx = (int)f.x + ox;
-    int by = (int)f.y - 25 + oy;
+    int floorY = (int)f.y + FLOOR_DRAW_OFF + oy;   // 足元を画面の床の線に合わせる
 
     int bw = (c == 4) ? 24 : 14;
     int bh = (c == 4) ? 28 : 22;
     bool crouchPose = f.crouching && (f.state == ACT_IDLE || f.state == ACT_GUARD);
-    if (crouchPose) {
-        by += bh * 4 / 10;
-        bh = bh * 6 / 10;
+    if (crouchPose) bh = bh * 6 / 10;
+    int by = floorY - bh;
+
+    // 立ち状態は画像があれば画像で描く（通常64px / 大前128px の高さに合わせる）
+    int img = g_charaGraph[c];
+    bool useImage = (img != -1 && f.state == ACT_IDLE && !crouchPose);
+    int imgH = (c == 4) ? 128 : 64;
+    double imgScale = 1.0;
+    if (useImage) {
+        int gw = 0, gh = 0;
+        GetGraphSize(img, &gw, &gh);
+        if (gh > 0) imgScale = (double)imgH / (double)gh;
     }
 
     int markerBaseY = by - bh - 24;
+    if (useImage && floorY - imgH - 12 < markerBaseY) markerBaseY = floorY - imgH - 12;
     if (isYou) {
         DrawString(bx - 10, markerBaseY - 14, "YOU", YELLOW);
         DrawTriangle(bx - 6, markerBaseY - 2, bx + 6, markerBaseY - 2, bx, markerBaseY + 6, YELLOW, TRUE);
         DrawTriangle(bx - 6, markerBaseY - 2, bx + 6, markerBaseY - 2, bx, markerBaseY + 6, WHITE, FALSE);
     }
     else {
-        const char* targetLabel = g_is_net_battle ? "2P" : ((g_mode == MODE_TRAINING) ? "DUMMY" : "COM");
+        const char* targetLabel = g_is_net_battle ? "2P" : ((g_mode == MODE_TRAINING || g_mode == MODE_TUTORIAL) ? "DUMMY" : "COM");
         unsigned int markerCol = g_is_net_battle ? BLUE : RED;
         int lw = GetDrawStringWidth(targetLabel, (int)strlen(targetLabel));
         DrawString(bx - lw / 2, markerBaseY - 14, targetLabel, markerCol);
@@ -3323,6 +3415,13 @@ static void DrawFighterBody(const Fighter& f, bool isYou) {
     // 無敵中は半透明
     if (f.invulFrames > 0 && (f.state == ACT_DODGE || (g_frameCount / 2) % 2 == 0)) {
         SetDrawBlendMode(DX_BLENDMODE_ALPHA, 110);
+    }
+
+    if (useImage) {
+        // 画像は右向きで描かれている前提。左を向いているときは左右反転する
+        DrawRotaGraph(bx, floorY - imgH / 2, imgScale, 0.0, img, TRUE, (f.dir < 0) ? TRUE : FALSE);
+        if (c == 8 && (g_frameCount / 40) % 3 == 0) DrawString(bx + 14, floorY - imgH - 4, "ﾆﾔﾆﾔ", CYAN);
+        return;
     }
 
     // 転倒中は寝そべり
@@ -3583,7 +3682,7 @@ static void DrawHitboxes() {
     }
 }
 
-enum HudMode { HUD_STORY, HUD_NET, HUD_TRAINING };
+enum HudMode { HUD_STORY, HUD_NET, HUD_TRAINING, HUD_TUTORIAL };
 
 static void DrawInputHistory(int y) {
     int x = 8;
@@ -3622,6 +3721,7 @@ static void DrawHud(HudMode hud) {
     int ox = g_shakeOffsetX;
     int oy = g_shakeOffsetY;
     bool isNet = (hud == HUD_NET);
+    bool practice = (hud == HUD_TRAINING || hud == HUD_TUTORIAL);
 
     int stage = ClampI(g_slots[g_currentSlot].stageProgress, 0, LAST_STAGE);
 
@@ -3635,8 +3735,8 @@ static void DrawHud(HudMode hud) {
     if (hud == HUD_NET) {
         DrawFormatString(32, 5, WHITE, "1P: YOU [%s]", CHARA_PROFILES[g_me.charaIndex].charaId);
     }
-    else if (hud == HUD_TRAINING) {
-        DrawFormatString(32, 5, WHITE, "TRAINING: %s", CHARA_PROFILES[g_me.charaIndex].charaId);
+    else if (practice) {
+        DrawFormatString(32, 5, WHITE, (hud == HUD_TRAINING) ? "TRAINING: %s" : "TUTORIAL: %s", CHARA_PROFILES[g_me.charaIndex].charaId);
     }
     else {
         DrawFormatString(32, 5, WHITE, "DATA %d: %s", g_currentSlot + 1, CHARA_PROFILES[g_me.charaIndex].charaId);
@@ -3660,7 +3760,7 @@ static void DrawHud(HudMode hud) {
     if (hud == HUD_NET) {
         DrawFormatString(450, 5, WHITE, "2P: REMOTE [%s]", CHARA_PROFILES[g_other.charaIndex].charaId);
     }
-    else if (hud == HUD_TRAINING) {
+    else if (practice) {
         DrawFormatString(400, 5, WHITE, "DUMMY: %s", CHARA_PROFILES[g_other.charaIndex].charaId);
     }
     else {
@@ -3677,7 +3777,7 @@ static void DrawHud(HudMode hud) {
 
     // タイマー
     DrawBox(292, 16, 348, 52, GetColor(20, 20, 30), TRUE);
-    bool infiniteTime = (hud == HUD_TRAINING) || (isNet && g_netRules.timeLimit == 0);
+    bool infiniteTime = practice || (isNet && g_netRules.timeLimit == 0);
     DrawBox(292, 16, 348, 52, (!infiniteTime && g_roundTime <= 10) ? RED : YELLOW, FALSE);
     if (infiniteTime) DrawString(312, 24, "∞", YELLOW);
     else DrawFormatString(304, 24, (g_roundTime <= 10) ? RED : YELLOW, "%02d", g_roundTime);
@@ -3721,7 +3821,7 @@ static void DrawHud(HudMode hud) {
     }
 
     // コンボ通知
-    if (hud != HUD_TRAINING && g_me.comboCount > 1 && g_me.comboDisplayTimer > 0) {
+    if (!practice && g_me.comboCount > 1 && g_me.comboDisplayTimer > 0) {
         DrawBox(35, 95, 250, 138, GetColor(0, 0, 0), TRUE);
         DrawBox(35, 95, 250, 138, YELLOW, FALSE);
         DrawFormatString(45, 100, YELLOW, "%d HITS COMBO !!", g_me.comboCount);
@@ -3771,7 +3871,7 @@ static void DrawHud(HudMode hud) {
         }
     }
 
-    if (hud != HUD_TRAINING) {
+    if (!practice) {
         if (g_readyFightTimer < 50) {
             DrawBox(220, 195, 420, 245, GetColor(0, 0, 0), TRUE);
             DrawBox(220, 195, 420, 245, YELLOW, FALSE);
@@ -3789,8 +3889,8 @@ static void DrawHud(HudMode hud) {
         DrawInputHistory(444);
     }
     else {
-        DrawString(25, 444, "[A/D]移動 [AA/DD]ダッシュ [W]跳/空中W:2段 [空中SS]急降下 [I]回避 [TAB]技表", WHITE);
-        DrawString(25, 462, "[J/K/L]攻撃 [前+J]投げ [J+K]超必 [SPACE]長押しガード/タイミングでパリィ", WHITE);
+        DrawString(25, 444, "[A/D]移動 [AA/DD]ダッシュ [W]跳 [空中SS]急降下 [I]回避 [TAB]技表", WHITE);
+        DrawString(25, 462, "[J/K/L]攻撃 [前+J]投げ [J+K]超必 [SPACE]長押しガード/短押しパリィ", WHITE);
     }
 
     for (int i = 0; i < MAX_SHOTS; i++) {
@@ -4246,6 +4346,373 @@ static void UpdateTrainingFrame() {
     g_meNeutralFrames = meNeutral ? g_meNeutralFrames + 1 : 0;
     if (g_meNeutralFrames > 45) g_me.hp = g_me.maxHp;
     if (g_me.hp <= 0) g_me.hp = 1;
+}
+
+// ----------------------------------------------------
+// チュートリアル（3章構成。クリアするまで他のモードは遊べない）
+// ----------------------------------------------------
+enum TutKind { TK_MOVE, TK_JUMP, TK_HIT, TK_GUARD, TK_PARRY, TK_PARRY_HIT, TK_DASH, TK_AIR, TK_DODGE, TK_BURST };
+enum TutDummy { TD_STOP, TD_GUARD, TD_ATTACK, TD_COMBO };
+enum TutPhase { TP_INTRO, TP_PLAY, TP_STEP_CLEAR, TP_CHAPTER_CLEAR, TP_ALL_CLEAR };
+static const int TUT_HIT_ANY_J = -1;
+static const int TUT_HIT_SUPER = -3;
+
+struct TutStep {
+    const char* title;
+    const char* line1;
+    const char* line2;
+    int kind;
+    int param;
+    int target;
+    int dummy;
+    bool fullSp;
+};
+
+static const TutStep TUT_STEPS[] = {
+    // 第1章：基本操作
+    { "移動", "A / D で左右に歩いてみよう", "右へ少し、左へ少し歩けばOK", TK_MOVE, 0, 2, TD_STOP, false },
+    { "ジャンプ", "W でジャンプ！", "2回ジャンプしてみよう", TK_JUMP, 0, 2, TD_STOP, false },
+    { "通常技 J", "J は出の速い通常技。ダミーに3回当てよう", "近づいて J。当たった直後にもう一度 J で2段目が出る", TK_HIT, TUT_HIT_ANY_J, 3, TD_STOP, false },
+    { "中距離技 K", "K は中距離技。大乗殿は気弾を撃つ", "少し離れた位置から K を当てよう", TK_HIT, TAG_SHOT, 1, TD_STOP, false },
+    { "戦技 L", "L は戦技。大乗殿は昇天脚で相手を打ち上げる", "近づいて L を当てよう（跳んでくる相手の迎撃にも使える）", TK_HIT, ACT_SKILL_ATTACK, 1, TD_STOP, false },
+    { "ガード", "相手の攻撃は SPACE 長押しでガード", "ダミーの頭に「！」が出たら SPACE を押しっぱなし。3回ガード", TK_GUARD, 0, 3, TD_ATTACK, false },
+    // 第2章：投げとパリィ
+    { "投げ", "ガードを固める相手には投げが有効", "密着して 前(相手の方向) + J。投げを1回決めよう", TK_HIT, ACT_THROW, 1, TD_GUARD, false },
+    { "パリィ", "攻撃が当たる瞬間に SPACE を短く押すとパリィ", "「！」が消えた直後が狙い目。2回成功させよう", TK_PARRY, 0, 2, TD_ATTACK, false },
+    { "パリィから反撃", "パリィ成功で相手はピヨり、次の一撃が1.5倍になる", "パリィ → すぐ近づいて J を当てよう", TK_PARRY_HIT, 0, 1, TD_ATTACK, false },
+    // 第3章：ダッシュ・回避・バースト
+    { "ダッシュ", "同じ方向キーを素早く2回押すとダッシュ", "DD と AA をそれぞれ1回ずつ出そう", TK_DASH, 0, 2, TD_STOP, false },
+    { "空中アクション", "ジャンプ中に W でもう一度ジャンプ（2段ジャンプ）", "ジャンプ中に S を素早く2回で急降下。両方やってみよう", TK_AIR, 0, 2, TD_STOP, false },
+    { "回避", "I（または左Shift）で無敵ロール。攻撃をすり抜ける", "ダミーの「！」を見てから回避！ 2回かわそう", TK_DODGE, 0, 2, TD_ATTACK, false },
+    { "バースト", "連続で殴られている最中に SPACE でコンボから抜け出せる", "SPを50使う（今回は満タン）。殴られたら SPACE！", TK_BURST, 0, 1, TD_COMBO, true },
+    { "超必殺技", "SPが100溜まったら J+K 同時押しで超必殺技", "近づいて超必殺技を当てよう（今回はSP満タン）", TK_HIT, TUT_HIT_SUPER, 1, TD_STOP, true },
+};
+static const int TUT_CHAPTER_COUNT = 3;
+static const int TUT_CHAPTER_START[TUT_CHAPTER_COUNT + 1] = { 0, 6, 9, sizeof(TUT_STEPS) / sizeof(TUT_STEPS[0]) };
+static const char* TUT_CHAPTER_NAMES[TUT_CHAPTER_COUNT] = { "基本操作", "投げとパリィ", "ダッシュ・回避・バースト" };
+static const char* TUT_CHAPTER_DESC[TUT_CHAPTER_COUNT] = {
+    "まずは「歩く・跳ぶ・攻撃・ガード」の4つを覚えよう",
+    "守りを崩す「投げ」と、攻撃を弾き返す「パリィ」",
+    "素早い移動と、ピンチから抜け出す「バースト」"
+};
+
+struct TutorialState {
+    int chapter;
+    int step;
+    int phase;
+    int timer;
+    int progress;
+    float movedR, movedL, lastX;
+    bool flagA, flagB;
+    int parryTimer;
+    int attackDelay;      // ダミーの攻撃予告（「！」が出ている残りフレーム）
+    int attackCooldown;
+};
+static TutorialState g_tut;
+static int g_tutorialChapters = 0;   // クリアした章の数（tutorial.dat に保存）
+static int g_titleLockedMsgTimer = 0;
+
+static bool TutorialDone() { return g_tutorialChapters >= TUT_CHAPTER_COUNT; }
+
+static void LoadTutorialProgress() {
+    FILE* fp = NULL;
+    fopen_s(&fp, "tutorial.dat", "rb");
+    if (!fp) return;
+    int v = 0;
+    if (fread(&v, sizeof(v), 1, fp) == 1) g_tutorialChapters = ClampI(v, 0, TUT_CHAPTER_COUNT);
+    fclose(fp);
+}
+
+static void SaveTutorialProgress() {
+    FILE* fp = NULL;
+    fopen_s(&fp, "tutorial.dat", "wb");
+    if (!fp) return;
+    fwrite(&g_tutorialChapters, sizeof(g_tutorialChapters), 1, fp);
+    fclose(fp);
+}
+
+static void StartTutorialStep(int step) {
+    g_tut.step = step;
+    g_tut.progress = 0;
+    g_tut.movedR = g_tut.movedL = 0.0f;
+    g_tut.flagA = g_tut.flagB = false;
+    g_tut.parryTimer = 0;
+    g_tut.attackDelay = 0;
+    g_tut.attackCooldown = 60;
+    ResetFighter(g_me, 200.0f, 1, 0, PlayableMaxHp(0));
+    ResetFighter(g_other, 440.0f, -1, 0, CHARA_PROFILES[0].maxHp);
+    g_tut.lastX = g_me.x;
+    for (int i = 0; i < MAX_SHOTS; i++) g_shots[i].active = false;
+    ResetControl(g_ctrl[0]);
+    g_readyFightTimer = 80;
+}
+
+static void SetupTutorial(int chapter) {
+    g_is_net_battle = false;
+    g_currentStageIdx = 0;
+    g_gimmickEnabled = false;
+    InitStageGimmick(0);
+    ClearBattleObjects();
+    ResetBattleGlobals();
+    ResetMatchStats();
+    g_tut.chapter = ClampI(chapter, 0, TUT_CHAPTER_COUNT - 1);
+    StartTutorialStep(TUT_CHAPTER_START[g_tut.chapter]);
+    g_tut.phase = TP_INTRO;
+    g_tut.timer = 0;
+}
+
+static void TutorialProgress() {
+    const TutStep& s = TUT_STEPS[g_tut.step];
+    g_tut.progress++;
+    if (g_tut.progress >= s.target) {
+        g_tut.progress = s.target;
+        g_tut.phase = TP_STEP_CLEAR;
+        g_tut.timer = 0;
+        g_tut.attackDelay = 0;
+        g_flashTimer = 8;
+    }
+    else {
+        SpawnPopup(g_me.x, g_me.y - 110, "いいね！", GREEN);
+    }
+}
+
+static bool IsSuperState(int s) {
+    return s == ACT_SUPER_ATTACK || s == ACT_SUPER_AIR || s == ACT_SUPER_ENHANCED;
+}
+
+static void TutorialEvent(int ev, int param) {
+    if (g_mode != MODE_TUTORIAL || g_tut.phase != TP_PLAY) return;
+    const TutStep& s = TUT_STEPS[g_tut.step];
+    bool isJ = (param == ACT_LIGHT1 || param == ACT_LIGHT2);
+
+    switch (s.kind) {
+    case TK_JUMP:
+        if (ev == TE_JUMP) TutorialProgress();
+        break;
+    case TK_HIT:
+        if (ev != TE_HIT) break;
+        if (s.param == TUT_HIT_ANY_J) { if (isJ) TutorialProgress(); }
+        else if (s.param == TUT_HIT_SUPER) { if (IsSuperState(param)) TutorialProgress(); }
+        else if (param == s.param) TutorialProgress();
+        break;
+    case TK_GUARD:
+        if (ev == TE_GUARD) TutorialProgress();
+        break;
+    case TK_PARRY:
+        if (ev == TE_PARRY) TutorialProgress();
+        break;
+    case TK_PARRY_HIT:
+        if (ev == TE_PARRY) {
+            g_tut.parryTimer = 90;
+            SpawnPopup(g_me.x, g_me.y - 120, "今だ！ J で反撃！", YELLOW);
+        }
+        else if (ev == TE_HIT && isJ && g_tut.parryTimer > 0) {
+            TutorialProgress();
+        }
+        break;
+    case TK_DASH:
+        if (ev != TE_DASH) break;
+        if (param > 0 && !g_tut.flagA) { g_tut.flagA = true; TutorialProgress(); }
+        else if (param < 0 && !g_tut.flagB) { g_tut.flagB = true; TutorialProgress(); }
+        break;
+    case TK_AIR:
+        if (ev == TE_DOUBLE_JUMP && !g_tut.flagA) { g_tut.flagA = true; TutorialProgress(); }
+        else if (ev == TE_FAST_FALL && !g_tut.flagB) { g_tut.flagB = true; TutorialProgress(); }
+        break;
+    case TK_DODGE:
+        if (ev != TE_DODGE) break;
+        if (g_tut.attackDelay > 0 || IsAttackState(g_other.state)) TutorialProgress();
+        else SpawnPopup(g_me.x, g_me.y - 110, "「！」が出てから回避しよう", GRAY);
+        break;
+    case TK_BURST:
+        if (ev == TE_BURST) TutorialProgress();
+        break;
+    default:
+        break;
+    }
+}
+
+// チュートリアルのダミー：ステップに合わせて止まる・ガードする・予告付きで殴ってくる
+static void UpdateTutorialDummy() {
+    Fighter& d = g_other;
+    const TutStep& s = TUT_STEPS[g_tut.step];
+    if (!UpdateFighterCommon(d, g_me, false)) return;
+    UpdateStateSpecials(d, g_me);
+
+    bool freeGuard = (d.state == ACT_GUARD && d.stateTimer == 0 && d.guardStun == 0);
+    float dist = fabsf(g_me.x - d.x);
+
+    switch (s.dummy) {
+    case TD_GUARD:
+        if (d.state == ACT_IDLE && d.isGrounded) {
+            d.state = ACT_GUARD;
+            d.stateTimer = 0;
+        }
+        break;
+    case TD_ATTACK:
+    case TD_COMBO:
+        if (freeGuard) d.state = ACT_IDLE;
+        if (g_tut.attackCooldown > 0) g_tut.attackCooldown--;
+        if (d.state != ACT_IDLE || !d.isGrounded) break;
+        if (g_tut.attackDelay > 0) {
+            d.vx = 0;
+            if (--g_tut.attackDelay == 0) {
+                StartAttack(d, g_me, 0);
+                g_tut.attackCooldown = 70;
+            }
+            break;
+        }
+        if (dist > 70.0f) {
+            d.vx = (float)d.dir * 2.5f;
+            break;
+        }
+        if (g_tut.attackCooldown == 0) {
+            if (s.dummy == TD_COMBO) {
+                StartAttack(d, g_me, 0);
+                g_tut.attackCooldown = 4;
+            }
+            else {
+                g_tut.attackDelay = 30;
+            }
+        }
+        break;
+    default:
+        if (freeGuard) d.state = ACT_IDLE;
+        break;
+    }
+    CheckAttackHit(d, g_me);
+}
+
+static void UpdateTutorialFrame() {
+    if (g_tut.parryTimer > 0) g_tut.parryTimer--;
+
+    switch (g_tut.phase) {
+    case TP_INTRO:
+        g_tut.timer++;
+        UpdateEffects();
+        if (g_tut.timer > 30 && KeyHit(KEY_INPUT_RETURN)) {
+            g_tut.phase = TP_PLAY;
+            g_tut.timer = 0;
+        }
+        break;
+
+    case TP_PLAY: {
+        const TutStep& s = TUT_STEPS[g_tut.step];
+        UpdateControlledFighter(g_me, g_other, g_ctrl[0], ReadLocalBits());
+        if (g_tut.phase != TP_PLAY) { UpdateEffects(); break; }
+        UpdateTutorialDummy();
+        UpdateShots();
+        UpdateEffects();
+
+        if (s.fullSp) g_me.spGauge = 100;
+        g_me.stamina = g_me.maxStamina;   // チュートリアル中はスタミナ切れで困らないように
+
+        if (s.kind == TK_MOVE && g_tut.phase == TP_PLAY) {
+            float dx = g_me.x - g_tut.lastX;
+            if (g_me.isGrounded && (g_me.state == ACT_IDLE || g_me.state == ACT_DASH)) {
+                if (dx > 0) g_tut.movedR += dx;
+                else g_tut.movedL -= dx;
+            }
+            if (!g_tut.flagA && g_tut.movedR >= 60.0f) { g_tut.flagA = true; TutorialProgress(); }
+            if (g_tut.phase == TP_PLAY && !g_tut.flagB && g_tut.movedL >= 60.0f) { g_tut.flagB = true; TutorialProgress(); }
+        }
+        g_tut.lastX = g_me.x;
+
+        // 体力は減っても自動で戻る（負けて終わることはない）
+        if (!IsHitState(g_other.state) && g_other.hp < g_other.maxHp / 2) g_other.hp = g_other.maxHp;
+        if (!IsHitState(g_me.state) && g_me.hp < g_me.maxHp / 2) g_me.hp = g_me.maxHp;
+        if (g_me.hp <= 0) g_me.hp = 1;
+        if (g_other.hp <= 0) g_other.hp = 1;
+        break;
+    }
+
+    case TP_STEP_CLEAR:
+        UpdateEffects();
+        if (++g_tut.timer >= 60) {
+            int next = g_tut.step + 1;
+            if (next >= TUT_CHAPTER_START[g_tut.chapter + 1]) {
+                if (g_tutorialChapters < g_tut.chapter + 1) {
+                    g_tutorialChapters = g_tut.chapter + 1;
+                    SaveTutorialProgress();
+                }
+                g_tut.phase = (g_tut.chapter + 1 >= TUT_CHAPTER_COUNT) ? TP_ALL_CLEAR : TP_CHAPTER_CLEAR;
+                g_tut.timer = 0;
+            }
+            else {
+                StartTutorialStep(next);
+                g_tut.phase = TP_PLAY;
+            }
+        }
+        break;
+
+    case TP_CHAPTER_CLEAR:
+    case TP_ALL_CLEAR:
+        g_tut.timer++;
+        UpdateEffects();
+        break;
+    }
+}
+
+static void DrawTutorialOverlay() {
+    const TutStep& s = TUT_STEPS[g_tut.step];
+    int chapterStart = TUT_CHAPTER_START[g_tut.chapter];
+    int stepsInChapter = TUT_CHAPTER_START[g_tut.chapter + 1] - chapterStart;
+
+    // ダミーの攻撃予告：輪が縮みきって「！」が消えた直後に攻撃が来る
+    if (g_tut.attackDelay > 0) {
+        int dx = (int)g_other.x + g_shakeOffsetX;
+        int dy = (int)g_other.y - 70 + g_shakeOffsetY;
+        DrawCircle(dx, dy + 12, 10 + g_tut.attackDelay * 2, YELLOW, FALSE, 2);
+        DrawExtendString(dx - 16, dy - 4, 2.0, 2.0, "！", RED);
+    }
+
+    // 指示パネル
+    DrawBox(20, 64, 620, 166, GetColor(5, 10, 25), TRUE);
+    DrawBox(20, 64, 620, 166, YELLOW, FALSE);
+    DrawFormatString(30, 70, YELLOW, "第%d章 %s   STEP %d/%d", g_tut.chapter + 1, TUT_CHAPTER_NAMES[g_tut.chapter],
+        g_tut.step - chapterStart + 1, stepsInChapter);
+    DrawString(450, 70, "ESC:やめる TAB:技表", GRAY);
+    DrawFormatString(30, 94, ORANGE, "【%s】", s.title);
+    DrawFormatString(470, 94, WHITE, "%d / %d", g_tut.progress, s.target);
+    DrawBox(530, 98, 610, 108, GetColor(40, 40, 40), TRUE);
+    DrawBox(530, 98, 530 + 80 * g_tut.progress / s.target, 108, GREEN, TRUE);
+    DrawString(30, 118, s.line1, WHITE);
+    DrawString(30, 140, s.line2, CYAN);
+
+    // 段階ごとの全画面表示
+    if (g_tut.phase == TP_INTRO) {
+        DrawBox(80, 180, 560, 340, BLACK, TRUE);
+        DrawBox(80, 180, 560, 340, YELLOW, FALSE);
+        char buf[64];
+        sprintf_s(buf, "第%d章", g_tut.chapter + 1);
+        DrawExtendString(270, 196, 2.0, 2.0, buf, YELLOW);
+        int w = GetDrawStringWidth(TUT_CHAPTER_NAMES[g_tut.chapter], (int)strlen(TUT_CHAPTER_NAMES[g_tut.chapter]));
+        DrawString(320 - w / 2, 240, TUT_CHAPTER_NAMES[g_tut.chapter], WHITE);
+        w = GetDrawStringWidth(TUT_CHAPTER_DESC[g_tut.chapter], (int)strlen(TUT_CHAPTER_DESC[g_tut.chapter]));
+        DrawString(320 - w / 2, 270, TUT_CHAPTER_DESC[g_tut.chapter], CYAN);
+        DrawString(250, 308, "[Enter] スタート", (g_frameCount / 20) % 2 ? WHITE : GRAY);
+    }
+    else if (g_tut.phase == TP_STEP_CLEAR) {
+        DrawExtendString(250, 220, 3.0, 3.0, "OK!!", (g_frameCount / 4) % 2 ? YELLOW : ORANGE);
+    }
+    else if (g_tut.phase == TP_CHAPTER_CLEAR) {
+        DrawBox(80, 180, 560, 340, BLACK, TRUE);
+        DrawBox(80, 180, 560, 340, GREEN, FALSE);
+        char buf[64];
+        sprintf_s(buf, "第%d章 クリア！", g_tut.chapter + 1);
+        DrawExtendString(200, 196, 2.0, 2.0, buf, GREEN);
+        DrawFormatString(150, 250, WHITE, "次は 第%d章「%s」", g_tut.chapter + 2, TUT_CHAPTER_NAMES[g_tut.chapter + 1]);
+        DrawString(150, 300, "[Enter] 次の章へ    [Esc] タイトルへ（続きから再開できます）", GRAY);
+    }
+    else if (g_tut.phase == TP_ALL_CLEAR) {
+        DrawBox(50, 170, 590, 360, BLACK, TRUE);
+        DrawBox(50, 170, 590, 360, YELLOW, FALSE);
+        DrawExtendString(150, 186, 2.0, 2.0, "チュートリアル完了！", (g_frameCount / 8) % 2 ? YELLOW : ORANGE);
+        DrawString(80, 240, "ストーリー・トレーニング・通信対戦が遊べるようになりました！", WHITE);
+        DrawString(80, 266, "キャラ固有の技は、試合中やキャラ選択で TAB を押すと確認できます。", CYAN);
+        DrawString(80, 292, "トレーニングではコンボ課題やフレーム表示で、さらに上達できます。", CYAN);
+        DrawString(220, 330, "[Enter] タイトルへ", (g_frameCount / 20) % 2 ? WHITE : GRAY);
+    }
 }
 
 // ----------------------------------------------------
@@ -4734,6 +5201,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     srand((unsigned int)time(NULL));
     InitMasterData();
     LoadAllSlots();
+    LoadTutorialProgress();
+    LoadCharaGraphs();
     memset(g_keyNow, 0, sizeof(g_keyNow));
     memset(g_keyPrev, 0, sizeof(g_keyPrev));
 
@@ -4760,31 +5229,68 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         switch (g_mode) {
         case MODE_TITLE: {
-            static const char* items[4] = {
-                "MAIN STORY (CPU勝ち抜き)", "TRAINING (トレーニング)", "LAN VERSUS (ローカル通信対戦)", "EXIT"
+            static const char* items[5] = {
+                "TUTORIAL (チュートリアル)", "MAIN STORY (CPU勝ち抜き)", "TRAINING (トレーニング)",
+                "LAN VERSUS (ローカル通信対戦)", "EXIT"
             };
+            bool tutDone = TutorialDone();
             DrawBox(0, 0, 640, 480, BG_DARK, TRUE);
-            DrawString(140, 70, "=== STREET DUEL: ARCADE CLASH ===", YELLOW);
-            DrawString(190, 110, "世界格闘チャンピオンシップ", WHITE);
+            DrawString(140, 60, "=== STREET DUEL: ARCADE CLASH ===", YELLOW);
+            DrawString(190, 96, "世界格闘チャンピオンシップ", WHITE);
 
-            for (int i = 0; i < 4; i++) {
-                bool sel = (g_titleMenu == i);
-                DrawFormatString(200, 200 + i * 40, sel ? YELLOW : WHITE, "%s%s", sel ? "> " : "  ", items[i]);
+            if (!tutDone) {
+                DrawBox(60, 130, 580, 166, GetColor(40, 30, 0), TRUE);
+                DrawBox(60, 130, 580, 166, YELLOW, FALSE);
+                DrawString(76, 140, "はじめての方へ：まずはチュートリアルで基本操作を覚えよう！", YELLOW);
             }
-            if (g_titleMenu == 1) DrawString(150, 370, "システムやキャラの技を自由に練習できます", GRAY);
 
-            DrawString(180, 410, "[W/S]: 選択   [ENTER]: 決定", GRAY);
+            for (int i = 0; i < 5; i++) {
+                bool sel = (g_titleMenu == i);
+                bool locked = !tutDone && i >= 1 && i <= 3;
+                int y = 190 + i * 34;
+                unsigned int col = locked ? GetColor(90, 90, 100) : (sel ? YELLOW : WHITE);
+                DrawFormatString(200, y, col, "%s%s", sel ? "> " : "  ", items[i]);
+                if (locked) DrawString(480, y, "[LOCK]", GetColor(140, 110, 40));
+                if (i == 0) {
+                    if (tutDone) DrawString(480, y, "[済]", GREEN);
+                    else {
+                        if ((g_frameCount / 15) % 2) DrawString(84, y, "まずはここ→", ORANGE);
+                        if (g_tutorialChapters > 0) DrawFormatString(480, y, CYAN, "第%d章から", g_tutorialChapters + 1);
+                    }
+                }
+            }
+
+            if (g_titleMenu == 0) DrawString(110, 370, "操作を3章に分けて少しずつ学べます。クリアで全モード解放", GRAY);
+            else if (!tutDone && g_titleMenu <= 3) DrawString(150, 370, "チュートリアルをクリアすると遊べます", GRAY);
+            else if (g_titleMenu == 2) DrawString(150, 370, "システムやキャラの技を自由に練習できます", GRAY);
+
+            DrawString(180, 420, "[W/S]: 選択   [ENTER]: 決定", GRAY);
+
+            if (g_titleLockedMsgTimer > 0) {
+                g_titleLockedMsgTimer--;
+                DrawBox(110, 280, 530, 324, BLACK, TRUE);
+                DrawBox(110, 280, 530, 324, RED, FALSE);
+                DrawString(130, 294, "まずはチュートリアルをクリアしよう！（一番上）", RED);
+            }
 
             if (s_keyCooldown == 0) {
-                if (CheckHitKey(KEY_INPUT_W) || CheckHitKey(KEY_INPUT_UP)) { g_titleMenu = (g_titleMenu + 3) % 4; s_keyCooldown = 12; }
-                if (CheckHitKey(KEY_INPUT_S) || CheckHitKey(KEY_INPUT_DOWN)) { g_titleMenu = (g_titleMenu + 1) % 4; s_keyCooldown = 12; }
+                if (CheckHitKey(KEY_INPUT_W) || CheckHitKey(KEY_INPUT_UP)) { g_titleMenu = (g_titleMenu + 4) % 5; s_keyCooldown = 12; }
+                if (CheckHitKey(KEY_INPUT_S) || CheckHitKey(KEY_INPUT_DOWN)) { g_titleMenu = (g_titleMenu + 1) % 5; s_keyCooldown = 12; }
                 if (CheckHitKey(KEY_INPUT_RETURN)) {
                     s_keyCooldown = 15;
-                    if (g_titleMenu == 0) {
+                    if (!tutDone && g_titleMenu >= 1 && g_titleMenu <= 3) {
+                        g_titleLockedMsgTimer = 90;
+                    }
+                    else if (g_titleMenu == 0) {
+                        SetupTutorial(tutDone ? 0 : g_tutorialChapters);
+                        g_cmdListOpen = false;
+                        g_mode = MODE_TUTORIAL;
+                    }
+                    else if (g_titleMenu == 1) {
                         g_is_net_battle = false;
                         g_mode = MODE_SLOT_SELECT;
                     }
-                    else if (g_titleMenu == 1) {
+                    else if (g_titleMenu == 2) {
                         g_is_net_battle = false;
                         trainCharaCount = 0;
                         for (int i = 0; i < ROSTER_COUNT; i++) {
@@ -4797,7 +5303,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                         g_cmdListOpen = false;
                         g_mode = MODE_TRAINING_SELECT;
                     }
-                    else if (g_titleMenu == 2) {
+                    else if (g_titleMenu == 3) {
                         g_is_net_battle = true;
                         g_mode = MODE_NET_MENU;
                     }
@@ -5349,6 +5855,42 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         }
 
                         // ==========================================
+                        // TUTORIAL
+                        // ==========================================
+        case MODE_TUTORIAL: {
+            if (g_tut.phase == TP_PLAY) HandleCommandListKeys(g_me.charaIndex, false, true);
+            if (!g_cmdListOpen) UpdateTutorialFrame();
+
+            DrawStageBackground(0);
+            DrawGimmick(0);
+            DrawFighterObj(g_me, true);
+            DrawFighterObj(g_other, false);
+            DrawHud(HUD_TUTORIAL);
+            DrawTutorialOverlay();
+            if (g_cmdListOpen) {
+                DrawCommandList(false);
+                break;
+            }
+
+            if (g_tut.phase == TP_CHAPTER_CLEAR && g_tut.timer > 30) {
+                if (KeyHit(KEY_INPUT_RETURN)) SetupTutorial(g_tut.chapter + 1);
+                else if (KeyHit(KEY_INPUT_ESCAPE)) { g_mode = MODE_TITLE; s_keyCooldown = 15; }
+            }
+            else if (g_tut.phase == TP_ALL_CLEAR) {
+                if (g_tut.timer > 30 && (KeyHit(KEY_INPUT_RETURN) || KeyHit(KEY_INPUT_ESCAPE))) {
+                    g_mode = MODE_TITLE;
+                    g_titleMenu = 1;
+                    s_keyCooldown = 15;
+                }
+            }
+            else if (KeyHit(KEY_INPUT_ESCAPE)) {
+                g_mode = MODE_TITLE;
+                s_keyCooldown = 15;
+            }
+            break;
+        }
+
+                        // ==========================================
                         // TRAINING
                         // ==========================================
         case MODE_TRAINING_SELECT: {
@@ -5732,6 +6274,7 @@ EXIT_GAME:
     CloseSocket(g_peer);
     CloseSocket(g_listen);
     WSACleanup();
+    DeleteCharaGraphs();
     DxLib_End();
     return 0;
 }
