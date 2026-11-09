@@ -134,6 +134,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="drawgra.h" />
+    <ClInclude Include="game_defs.h" />
+    <ClInclude Include="game_data.h" />
+    <ClInclude Include="game_combat.h" />
+    <ClInclude Include="game_control.h" />
+    <ClInclude Include="game_draw_world.h" />
+    <ClInclude Include="game_draw_ui.h" />
+    <ClInclude Include="game_modes.h" />
+    <ClInclude Include="game_net.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
